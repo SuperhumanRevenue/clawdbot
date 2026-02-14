@@ -28,6 +28,7 @@ import { EventEmitter } from "node:events";
 import * as http from "node:http";
 import type { MemoryConfig, SessionMessage } from "../types.js";
 import { MemoryAgent } from "../agent.js";
+import { ConversationManager } from "../conversation.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -101,26 +102,17 @@ export class CursorChannelAdapter extends EventEmitter {
   async send(message: string): Promise<string> {
     if (!message.trim()) return "";
 
-    this.sessionMessages.push({
-      role: "user",
-      content: message,
-      timestamp: new Date(),
-    });
-
-    const response = await this.agent.run(message);
-
-    this.sessionMessages.push({
-      role: "assistant",
-      content: response,
-      timestamp: new Date(),
-    });
+    // Use conversation thread for multi-turn context
+    const threadKey = ConversationManager.cursorKey(this.sessionId);
+    const result = await this.agent.runInThread(threadKey, message);
 
     this.emit("message_processed", {
       sessionId: this.sessionId,
-      responseLength: response.length,
+      responseLength: result.text.length,
+      usage: result.usage,
     });
 
-    return response;
+    return result.text;
   }
 
   /**
@@ -209,9 +201,9 @@ export class CursorChannelAdapter extends EventEmitter {
   async stopServer(): Promise<void> {
     if (!this.running) return;
 
-    if (this.sessionMessages.length > 0) {
-      await this.agent.saveSession(this.sessionId, "cursor", this.sessionMessages);
-      this.sessionMessages = [];
+    const allMessages = this.agent.conversations.getAllSessionMessages();
+    if (allMessages.length > 0) {
+      await this.agent.saveSession(this.sessionId, "cursor", allMessages);
     }
 
     if (this.server) {
@@ -303,15 +295,18 @@ export class CursorChannelAdapter extends EventEmitter {
    * Manually flush the current session to memory (without stopping).
    */
   async flushSession(): Promise<string | null> {
-    if (this.sessionMessages.length === 0) return null;
-    return this.agent.flushMemory(this.sessionMessages);
+    const messages = this.agent.conversations.getAllSessionMessages();
+    if (messages.length === 0) return null;
+    return this.agent.flushMemory(messages);
   }
 
   /**
    * Get the current session message count.
    */
   getSessionLength(): number {
-    return this.sessionMessages.length;
+    const threadKey = ConversationManager.cursorKey(this.sessionId);
+    const thread = this.agent.conversations.getThread(threadKey);
+    return thread.sessionMessages.length;
   }
 }
 

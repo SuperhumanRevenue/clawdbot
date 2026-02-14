@@ -21,6 +21,7 @@ import { EventEmitter } from "node:events";
 import * as readline from "node:readline";
 import type { MemoryConfig, SessionMessage } from "../types.js";
 import { MemoryAgent } from "../agent.js";
+import { ConversationManager } from "../conversation.js";
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -56,6 +57,8 @@ export interface TerminalChannelConfig {
   showBanner?: boolean;
   /** Session identifier (default: auto-generated) */
   sessionId?: string;
+  /** Enable streaming responses — tokens print as they arrive (default: true) */
+  streaming?: boolean;
   /** Input stream (default: process.stdin) */
   input?: NodeJS.ReadableStream;
   /** Output stream (default: process.stdout) */
@@ -154,11 +157,11 @@ export class TerminalChannelAdapter extends EventEmitter {
   async stop(): Promise<void> {
     if (!this.running) return;
 
-    if (this.sessionMessages.length > 0) {
+    const allMessages = this.agent.conversations.getAllSessionMessages();
+    if (allMessages.length > 0) {
       this.write(this.fmt("\nSaving session to memory...", "dim"));
-      await this.agent.saveSession(this.sessionId, "terminal", this.sessionMessages);
+      await this.agent.saveSession(this.sessionId, "terminal", allMessages);
       this.write(this.fmt("Session saved.\n", "green"));
-      this.sessionMessages = [];
     }
 
     if (this.rl) {
@@ -181,26 +184,16 @@ export class TerminalChannelAdapter extends EventEmitter {
   async send(message: string): Promise<string> {
     if (!message.trim()) return "";
 
-    this.sessionMessages.push({
-      role: "user",
-      content: message,
-      timestamp: new Date(),
-    });
-
-    const response = await this.agent.run(message);
-
-    this.sessionMessages.push({
-      role: "assistant",
-      content: response,
-      timestamp: new Date(),
-    });
+    const threadKey = ConversationManager.terminalKey(this.sessionId);
+    const result = await this.agent.runInThread(threadKey, message);
 
     this.emit("message_processed", {
       sessionId: this.sessionId,
-      responseLength: response.length,
+      responseLength: result.text.length,
+      usage: result.usage,
     });
 
-    return response;
+    return result.text;
   }
 
   /**
@@ -215,39 +208,53 @@ export class TerminalChannelAdapter extends EventEmitter {
   // -------------------------------------------------------------------------
 
   private async handleUserInput(text: string): Promise<void> {
-    this.sessionMessages.push({
-      role: "user",
-      content: text,
-      timestamp: new Date(),
-    });
-
-    this.write(this.fmt("  thinking...", "dim"));
+    const threadKey = ConversationManager.terminalKey(this.sessionId);
+    const label = this.fmt(
+      `${this.config.botName ?? "agent"} > `,
+      "cyan",
+      true,
+    );
 
     try {
-      const response = await this.agent.run(text);
+      // Streaming mode: print tokens as they arrive
+      if (this.config.streaming !== false) {
+        this.write(label);
+        const result = await this.agent.runStreaming(
+          text,
+          {
+            onToken: (token) => this.write(token),
+            onToolStart: (name) => {
+              this.write(this.fmt(`\n  [using ${name}...]`, "dim"));
+            },
+            onToolEnd: () => {
+              this.clearLine();
+            },
+          },
+          threadKey,
+        );
+        this.write("\n\n");
 
-      this.sessionMessages.push({
-        role: "assistant",
-        content: response,
-        timestamp: new Date(),
-      });
+        this.emit("message_processed", {
+          sessionId: this.sessionId,
+          responseLength: result.text.length,
+          usage: result.usage,
+        });
+      } else {
+        // Blocking mode: wait for full response
+        this.write(this.fmt("  thinking...", "dim"));
+        const result = await this.agent.runInThread(threadKey, text);
+        this.clearLine();
+        this.write(`${label}${result.text}\n\n`);
 
-      // Clear "thinking..." and print response
-      this.clearLine();
-      const label = this.fmt(
-        `${this.config.botName ?? "agent"} > `,
-        "cyan",
-        true,
-      );
-      this.write(`${label}${response}\n\n`);
-
-      this.emit("message_processed", {
-        sessionId: this.sessionId,
-        responseLength: response.length,
-      });
+        this.emit("message_processed", {
+          sessionId: this.sessionId,
+          responseLength: result.text.length,
+          usage: result.usage,
+        });
+      }
     } catch (err) {
       this.clearLine();
-      this.write(this.fmt(`Error: ${err instanceof Error ? err.message : String(err)}\n`, "red"));
+      this.write(this.fmt(`\nError: ${err instanceof Error ? err.message : String(err)}\n`, "red"));
       this.emit("error", err);
     }
   }
@@ -296,12 +303,13 @@ export class TerminalChannelAdapter extends EventEmitter {
       }
 
       case "/flush": {
-        if (this.sessionMessages.length === 0) {
+        const flushMessages = this.agent.conversations.getAllSessionMessages();
+        if (flushMessages.length === 0) {
           this.write(this.fmt("No messages to flush.\n", "dim"));
           return true;
         }
         this.write(this.fmt("  flushing...", "dim"));
-        const path = await this.agent.flushMemory(this.sessionMessages);
+        const path = await this.agent.flushMemory(flushMessages);
         this.clearLine();
         this.write(this.fmt(`Flushed to: ${path}\n\n`, "green"));
         return true;
@@ -384,15 +392,18 @@ export class TerminalChannelAdapter extends EventEmitter {
    * Manually flush the current session to memory (without stopping).
    */
   async flushSession(): Promise<string | null> {
-    if (this.sessionMessages.length === 0) return null;
-    return this.agent.flushMemory(this.sessionMessages);
+    const messages = this.agent.conversations.getAllSessionMessages();
+    if (messages.length === 0) return null;
+    return this.agent.flushMemory(messages);
   }
 
   /**
    * Get the current session message count.
    */
   getSessionLength(): number {
-    return this.sessionMessages.length;
+    const threadKey = ConversationManager.terminalKey(this.sessionId);
+    const thread = this.agent.conversations.getThread(threadKey);
+    return thread.sessionMessages.length;
   }
 }
 

@@ -18,6 +18,7 @@
 import { EventEmitter } from "node:events";
 import type { MemoryConfig, SessionMessage } from "../types.js";
 import { MemoryAgent } from "../agent.js";
+import { ConversationManager } from "../conversation.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,6 +41,12 @@ export interface SlackChannelConfig {
   allowedUsers?: string[];
   /** Max response length before chunking (default: 4000) */
   maxResponseLength?: number;
+  /** Auto-reconnect on disconnect (default: true) */
+  autoReconnect?: boolean;
+  /** Max reconnect attempts before giving up (default: 10) */
+  maxReconnectAttempts?: number;
+  /** Enable streaming responses (default: false) */
+  streaming?: boolean;
 }
 
 export interface SlackIncomingMessage {
@@ -70,6 +77,7 @@ export class SlackChannelAdapter extends EventEmitter {
   private sessionMessages: SessionMessage[] = [];
   private botUserId: string | null = null;
   private running = false;
+  private reconnectAttempts = 0;
 
   // Injected Slack SDK clients (lazy-loaded to avoid hard dependency)
   private socketClient: unknown = null;
@@ -117,9 +125,52 @@ export class SlackChannelAdapter extends EventEmitter {
       await this.handleMessageEvent({ ...event, isMentionEvent: true });
     });
 
+    // Auto-reconnect on disconnect
+    if (this.config.autoReconnect !== false) {
+      socket.on("disconnect", async () => {
+        this.emit("disconnected_transient");
+        await this.attemptReconnect(socket);
+      });
+    }
+
     await socket.start();
     this.running = true;
+    this.reconnectAttempts = 0;
     this.emit("ready", { botUserId: this.botUserId });
+  }
+
+  /**
+   * Attempt to reconnect with exponential backoff.
+   */
+  private async attemptReconnect(socket: SocketModeLike): Promise<void> {
+    const maxAttempts = this.config.maxReconnectAttempts ?? 10;
+
+    while (this.reconnectAttempts < maxAttempts) {
+      this.reconnectAttempts++;
+      const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 30_000);
+      this.emit("reconnecting", {
+        attempt: this.reconnectAttempts,
+        maxAttempts,
+        delayMs: delay,
+      });
+
+      await sleep(delay);
+
+      try {
+        await socket.start();
+        this.reconnectAttempts = 0;
+        this.emit("reconnected");
+        return;
+      } catch (err) {
+        this.emit("reconnect_failed", {
+          attempt: this.reconnectAttempts,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    this.running = false;
+    this.emit("reconnect_exhausted", { attempts: this.reconnectAttempts });
   }
 
   /**
@@ -128,10 +179,10 @@ export class SlackChannelAdapter extends EventEmitter {
   async stop(): Promise<void> {
     if (!this.running) return;
 
-    // Save session
-    if (this.sessionMessages.length > 0) {
-      await this.agent.saveSession("slack-session", "slack", this.sessionMessages);
-      this.sessionMessages = [];
+    // Save all thread sessions to memory
+    const allMessages = this.agent.conversations.getAllSessionMessages();
+    if (allMessages.length > 0) {
+      await this.agent.saveSession("slack-session", "slack", allMessages);
     }
 
     const socket = this.socketClient as SocketModeLike | null;
@@ -181,37 +232,31 @@ export class SlackChannelAdapter extends EventEmitter {
       return "";
     }
 
-    // Track in session
-    this.sessionMessages.push({
-      role: "user",
-      content: cleanText,
-      timestamp: new Date(),
-    });
+    // Build thread key for conversation isolation (per-user, per-channel)
+    const threadKey = ConversationManager.slackKey(
+      message.userId,
+      message.channelId,
+      message.threadTs,
+    );
 
-    // Route through memory agent
-    const response = await this.agent.run(cleanText);
-
-    // Track response
-    this.sessionMessages.push({
-      role: "assistant",
-      content: response,
-      timestamp: new Date(),
-    });
+    // Route through memory agent with multi-turn context
+    const result = await this.agent.runInThread(threadKey, cleanText);
 
     // Send response back to Slack
     await this.sendResponse({
       channelId: message.channelId,
-      text: response,
+      text: result.text,
       threadTs: message.threadTs ?? message.ts,
     });
 
     this.emit("message_processed", {
       userId: message.userId,
       channelId: message.channelId,
-      responseLength: response.length,
+      responseLength: result.text.length,
+      usage: result.usage,
     });
 
-    return response;
+    return result.text;
   }
 
   // -------------------------------------------------------------------------
@@ -351,6 +396,10 @@ interface SlackMessageEvent {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function chunkText(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];

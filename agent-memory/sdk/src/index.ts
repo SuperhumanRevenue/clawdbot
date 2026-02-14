@@ -27,11 +27,41 @@
 
 // Core classes
 export { MemoryAgent } from "./agent.js";
+export type { StreamCallbacks } from "./agent.js";
 export { MemoryManager } from "./memory-manager.js";
 export { MemorySearch } from "./memory-search.js";
 export { MemoryFlush } from "./memory-flush.js";
 export { SessionMemory } from "./session-memory.js";
 export { DailyLogManager } from "./daily-log.js";
+
+// Multi-turn conversation management
+export { ConversationManager } from "./conversation.js";
+export type { ConversationThread, ConversationManagerConfig } from "./conversation.js";
+
+// Middleware pipeline
+export {
+  MiddlewarePipeline,
+  createLoggingMiddleware,
+  createContentFilterMiddleware,
+  createMetricsMiddleware,
+} from "./middleware.js";
+export type {
+  Middleware,
+  MessageContext,
+  MetricsSnapshot,
+} from "./middleware.js";
+
+// Rate limiting + cost tracking
+export { RateLimiter, CostTracker } from "./rate-limiter.js";
+export type {
+  RateLimiterConfig,
+  CostEntry,
+  CostSummary,
+} from "./rate-limiter.js";
+
+// Multi-channel hub
+export { ChannelHub } from "./channel-hub.js";
+export type { ChannelHubConfig, HubStatus } from "./channel-hub.js";
 
 // Communication channel adapters
 export {

@@ -15,7 +15,27 @@ import { MemorySearch } from "./memory-search.js";
 import { MemoryFlush } from "./memory-flush.js";
 import { SessionMemory } from "./session-memory.js";
 import { DailyLogManager } from "./daily-log.js";
+import { ConversationManager } from "./conversation.js";
 import type { MemoryConfig, MemoryTool, SessionMessage } from "./types.js";
+
+// ---------------------------------------------------------------------------
+// Streaming types
+// ---------------------------------------------------------------------------
+
+export interface StreamCallbacks {
+  /** Called for each text token as it arrives */
+  onToken?: (token: string) => void;
+  /** Called when a tool call starts */
+  onToolStart?: (toolName: string) => void;
+  /** Called when a tool call completes */
+  onToolEnd?: (toolName: string, result: string) => void;
+  /** Called with the full final text */
+  onComplete?: (fullText: string) => void;
+  /** Called if an error occurs */
+  onError?: (error: Error) => void;
+  /** Called with token usage after each API call */
+  onUsage?: (usage: { input_tokens: number; output_tokens: number }) => void;
+}
 
 // ---------------------------------------------------------------------------
 // Tool definitions (Claude Agent SDK format)
@@ -141,6 +161,9 @@ export class MemoryAgent {
   private dailyLog: DailyLogManager;
   private model: string;
 
+  /** Manages multi-turn conversation threads with per-user isolation */
+  readonly conversations: ConversationManager;
+
   constructor(config: MemoryConfig) {
     this.config = config;
     this.client = new Anthropic({ apiKey: config.anthropicApiKey });
@@ -150,6 +173,7 @@ export class MemoryAgent {
     this.flush = new MemoryFlush(config);
     this.sessionMemory = new SessionMemory(config);
     this.dailyLog = new DailyLogManager(config);
+    this.conversations = new ConversationManager();
   }
 
   /**
@@ -271,6 +295,206 @@ export class MemoryAgent {
     );
 
     return textBlocks.map((b) => b.text).join("\n");
+  }
+
+  /**
+   * Run a message within a conversation thread (multi-turn).
+   * Unlike `run()`, this preserves full conversation history so Claude
+   * can reference earlier messages in the same thread.
+   *
+   * @param threadId - Unique thread key (use ConversationManager static helpers)
+   * @param userMessage - The user's message
+   * @returns The agent's response text
+   */
+  async runInThread(threadId: string, userMessage: string): Promise<{
+    text: string;
+    usage: { input_tokens: number; output_tokens: number };
+  }> {
+    const systemPrompt = await this.buildSystemPrompt();
+    const messages = this.conversations.addUserMessage(threadId, userMessage);
+
+    let totalUsage = { input_tokens: 0, output_tokens: 0 };
+
+    let response = await this.client.messages.create({
+      model: this.model,
+      max_tokens: 4096,
+      system: systemPrompt,
+      tools: MEMORY_TOOLS,
+      messages,
+    });
+
+    if (response.usage) {
+      totalUsage.input_tokens += response.usage.input_tokens;
+      totalUsage.output_tokens += response.usage.output_tokens;
+    }
+
+    // Agentic tool-use loop
+    while (response.stop_reason === "tool_use") {
+      this.conversations.addAssistantResponse(threadId, response.content);
+
+      const toolUseBlocks = response.content.filter(
+        (block): block is Anthropic.Messages.ToolUseBlock =>
+          block.type === "tool_use"
+      );
+
+      const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+      for (const toolUse of toolUseBlocks) {
+        const result = await this.handleToolCall(
+          toolUse.name,
+          toolUse.input as Record<string, unknown>
+        );
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: result,
+        });
+      }
+
+      const updatedMessages = this.conversations.addToolResults(threadId, toolResults);
+
+      response = await this.client.messages.create({
+        model: this.model,
+        max_tokens: 4096,
+        system: systemPrompt,
+        tools: MEMORY_TOOLS,
+        messages: updatedMessages,
+      });
+
+      if (response.usage) {
+        totalUsage.input_tokens += response.usage.input_tokens;
+        totalUsage.output_tokens += response.usage.output_tokens;
+      }
+    }
+
+    // Record the final assistant response in the thread
+    this.conversations.addAssistantResponse(threadId, response.content);
+
+    const textBlocks = response.content.filter(
+      (block): block is Anthropic.Messages.TextBlock =>
+        block.type === "text"
+    );
+
+    return {
+      text: textBlocks.map((b) => b.text).join("\n"),
+      usage: totalUsage,
+    };
+  }
+
+  /**
+   * Run a message with streaming — tokens arrive via callbacks as they're generated.
+   * Supports both standalone and thread-based conversations.
+   *
+   * @param userMessage - The user's message
+   * @param callbacks - Stream event handlers
+   * @param threadId - Optional thread ID for multi-turn (omit for single-shot)
+   * @returns The full response text
+   */
+  async runStreaming(
+    userMessage: string,
+    callbacks: StreamCallbacks,
+    threadId?: string,
+  ): Promise<{
+    text: string;
+    usage: { input_tokens: number; output_tokens: number };
+  }> {
+    const systemPrompt = await this.buildSystemPrompt();
+    let totalUsage = { input_tokens: 0, output_tokens: 0 };
+
+    // Build messages — either from thread or fresh
+    let messages: Anthropic.Messages.MessageParam[];
+    if (threadId) {
+      messages = this.conversations.addUserMessage(threadId, userMessage);
+    } else {
+      messages = [{ role: "user", content: userMessage }];
+    }
+
+    let fullText = "";
+    let continueLoop = true;
+
+    while (continueLoop) {
+      continueLoop = false;
+
+      const stream = this.client.messages.stream({
+        model: this.model,
+        max_tokens: 4096,
+        system: systemPrompt,
+        tools: MEMORY_TOOLS,
+        messages,
+      });
+
+      // Collect streamed tokens
+      let currentToolName: string | null = null;
+
+      stream.on("text", (text) => {
+        fullText += text;
+        callbacks.onToken?.(text);
+      });
+
+      stream.on("contentBlock", (block) => {
+        if (block.type === "tool_use") {
+          currentToolName = block.name;
+          callbacks.onToolStart?.(block.name);
+        }
+      });
+
+      const finalMessage = await stream.finalMessage();
+
+      if (finalMessage.usage) {
+        totalUsage.input_tokens += finalMessage.usage.input_tokens;
+        totalUsage.output_tokens += finalMessage.usage.output_tokens;
+        callbacks.onUsage?.(finalMessage.usage);
+      }
+
+      // Handle tool use
+      if (finalMessage.stop_reason === "tool_use") {
+        if (threadId) {
+          this.conversations.addAssistantResponse(threadId, finalMessage.content);
+        } else {
+          messages.push({ role: "assistant", content: finalMessage.content });
+        }
+
+        const toolUseBlocks = finalMessage.content.filter(
+          (block): block is Anthropic.Messages.ToolUseBlock =>
+            block.type === "tool_use"
+        );
+
+        const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+        for (const toolUse of toolUseBlocks) {
+          const result = await this.handleToolCall(
+            toolUse.name,
+            toolUse.input as Record<string, unknown>
+          );
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: result,
+          });
+          callbacks.onToolEnd?.(toolUse.name, result);
+        }
+
+        if (threadId) {
+          messages = this.conversations.addToolResults(threadId, toolResults);
+        } else {
+          messages.push({ role: "user", content: toolResults });
+        }
+
+        fullText = ""; // Reset — final text comes after tools
+        continueLoop = true;
+      }
+    }
+
+    // Record in thread if using one
+    if (threadId) {
+      // The final non-tool response was already captured via stream events.
+      // Record it so the thread has the complete history.
+      this.conversations.addAssistantResponse(threadId, [
+        { type: "text", text: fullText },
+      ]);
+    }
+
+    callbacks.onComplete?.(fullText);
+
+    return { text: fullText, usage: totalUsage };
   }
 
   // -------------------------------------------------------------------------
