@@ -656,6 +656,296 @@ def compute_leverage(
 
 
 # ---------------------------------------------------------------------------
+# Proactive recommendations
+# ---------------------------------------------------------------------------
+
+# Each recommendation rule is a tuple:
+#   (id, category, check_fn, priority)
+# check_fn receives the full context dict and returns (message, detail) or None.
+# priority: 1 = critical, 2 = important, 3 = suggestion
+
+PRIORITY_LABELS = {1: "!!!", 2: "!!", 3: "->"}
+
+
+def _build_context(
+    sessions: List[Dict[str, Any]],
+    memory_outcomes: Dict[str, Any],
+    cron_data: Dict[str, Any],
+    leverage: Dict[str, Any],
+    period_days: int,
+    index: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build a flat context dict for recommendation rules to inspect."""
+    total_cost = sum(s["cost"] for s in sessions)
+    total_messages = sum(s["messages"] for s in sessions)
+    total_tool_calls = sum(s["total_tool_calls"] for s in sessions)
+    total_user_msgs = sum(s.get("user_messages", 0) for s in sessions)
+
+    # Tool counts
+    tool_counts: Counter = Counter()
+    for s in sessions:
+        for tool, count in s.get("tool_calls", {}).items():
+            tool_counts[tool] += count
+
+    # Channel distribution
+    channel_counts: Counter = Counter()
+    if index and isinstance(index, dict):
+        session_channels = {}
+        for sid, meta in index.items():
+            if isinstance(meta, dict):
+                session_channels[sid] = meta.get("channel", "unknown")
+        for s in sessions:
+            ch = session_channels.get(s["session_id"], "unknown")
+            channel_counts[ch] += 1
+
+    # Model costs
+    model_costs: Dict[str, float] = defaultdict(float)
+    for s in sessions:
+        for model in s.get("models", {}):
+            model_costs[model] += s["cost"] / max(len(s["models"]), 1)
+
+    return {
+        "sessions": sessions,
+        "period_days": period_days,
+        "total_cost": total_cost,
+        "daily_avg_cost": total_cost / max(period_days, 1),
+        "session_count": len(sessions),
+        "total_messages": total_messages,
+        "total_user_msgs": total_user_msgs,
+        "total_tool_calls": total_tool_calls,
+        "tool_counts": tool_counts,
+        "channel_counts": channel_counts,
+        "model_costs": model_costs,
+        "memory": memory_outcomes,
+        "cron": cron_data,
+        "leverage": leverage,
+        "total_files_touched": sum(
+            s.get("files_touched", 0) for s in sessions
+        ),
+        "total_commits": sum(s.get("git_commits", 0) for s in sessions),
+        "total_prs": sum(s.get("prs_created", 0) for s in sessions),
+        "total_tests": sum(s.get("tests_run", 0) for s in sessions),
+        "total_issues_closed": sum(
+            s.get("issues_closed", 0) for s in sessions
+        ),
+    }
+
+
+def generate_recommendations(
+    ctx: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Generate prioritized, actionable recommendations from analytics data.
+
+    Returns a list of dicts with keys: id, priority, category, message, detail.
+    Sorted by priority (1=critical first).
+    """
+    recs: List[Dict[str, Any]] = []
+
+    def add(
+        rec_id: str,
+        priority: int,
+        category: str,
+        message: str,
+        detail: str,
+    ) -> None:
+        recs.append({
+            "id": rec_id,
+            "priority": priority,
+            "category": category,
+            "message": message,
+            "detail": detail,
+        })
+
+    daily_cost = ctx["daily_avg_cost"]
+    total_cost = ctx["total_cost"]
+    sessions = ctx["sessions"]
+    period = ctx["period_days"]
+    cron = ctx["cron"]
+    lev = ctx["leverage"]
+    mem = ctx["memory"]
+    tool_counts = ctx["tool_counts"]
+    channel_counts = ctx["channel_counts"]
+    model_costs = ctx["model_costs"]
+
+    # --- Cost recommendations ---
+
+    if daily_cost > 15:
+        top_model = (
+            max(model_costs, key=model_costs.get)
+            if model_costs
+            else "unknown"
+        )
+        add(
+            "cost-high-daily", 1, "Cost",
+            f"Daily spend is {format_cost(daily_cost)} — consider model routing",
+            f"Route low-complexity tasks to Haiku. "
+            f"Top model {top_model} accounts for "
+            f"{format_cost(model_costs.get(top_model, 0))}.",
+        )
+    elif daily_cost > 5:
+        add(
+            "cost-elevated", 3, "Cost",
+            f"Daily spend is {format_cost(daily_cost)} — monitor trend",
+            "Review which channels or tasks drive the most cost with "
+            "--report cost.",
+        )
+
+    # Expensive model dominance
+    if model_costs:
+        total_model_cost = sum(model_costs.values())
+        for model, cost in model_costs.items():
+            if "opus" in model.lower() and total_model_cost > 0:
+                opus_pct = cost / total_model_cost * 100
+                if opus_pct > 80:
+                    add(
+                        "cost-opus-dominant", 2, "Cost",
+                        f"Opus handles {opus_pct:.0f}% of spend",
+                        "Consider using Sonnet for routine tasks like "
+                        "search, summarization, and simple edits. Reserve "
+                        "Opus for complex reasoning and architecture.",
+                    )
+
+    # --- Automation recommendations ---
+
+    if cron.get("jobs_active", 0) == 0:
+        add(
+            "auto-no-cron", 2, "Automation",
+            "No cron jobs configured — automate recurring work",
+            "Set up daily-briefing, weekly-insights, or backup jobs. "
+            "Example: openclaw cron add --name daily-briefing "
+            "--schedule '0 8 * * 1-5'",
+        )
+
+    cron_total = cron.get("total_runs", 0)
+    cron_fail = cron.get("failed_runs", 0)
+    if cron_total > 0 and cron_fail > 0:
+        fail_pct = cron_fail / cron_total * 100
+        if fail_pct > 20:
+            add(
+                "auto-cron-failing", 1, "Automation",
+                f"{cron_fail} cron runs failed ({fail_pct:.0f}%) — fix broken jobs",
+                "Check openclaw cron runs for error details. "
+                "Common causes: missing dependencies, stale prompts, "
+                "or script path changes.",
+            )
+        elif fail_pct > 5:
+            add(
+                "auto-cron-flaky", 3, "Automation",
+                f"{cron_fail} cron failures ({fail_pct:.0f}%) — investigate",
+                "Run openclaw cron runs to review recent errors.",
+            )
+
+    # --- Leverage recommendations ---
+
+    lev_ratio = lev.get("leverage_ratio", 0)
+    autonomy = lev.get("avg_autonomy_ratio", 0)
+
+    if lev_ratio > 0 and lev_ratio < 1.5 and ctx["total_files_touched"] > 0:
+        add(
+            "lev-low-ratio", 2, "Leverage",
+            f"Leverage ratio is {lev_ratio:.1f}x — agent is underutilized",
+            "Try giving broader instructions and letting the agent "
+            "plan multi-step work. Shorter, more directive prompts "
+            "reduce autonomy. Also check for stuck/looping sessions.",
+        )
+
+    if autonomy > 25:
+        add(
+            "lev-high-autonomy", 2, "Leverage",
+            f"Autonomy is {autonomy:.0f} actions/request — check for loops",
+            "Very high autonomy may indicate the agent is retrying "
+            "failed operations. Review long sessions for patterns "
+            "where the agent repeats the same tool calls.",
+        )
+    elif 0 < autonomy < 2:
+        add(
+            "lev-low-autonomy", 3, "Leverage",
+            f"Autonomy is {autonomy:.1f} actions/request — try batch prompts",
+            "You're directing each step. Try asking for broader tasks "
+            "(e.g. 'refactor this module' instead of 'rename this function') "
+            "to let the agent work more independently.",
+        )
+
+    # --- Outcome recommendations ---
+
+    if ctx["total_tests"] == 0 and ctx["total_commits"] > 3:
+        add(
+            "out-no-tests", 2, "Quality",
+            "No test runs detected across multiple commits",
+            "Consider asking the agent to run tests before committing. "
+            "Add 'run tests' to your workflow to catch regressions early.",
+        )
+
+    if ctx["total_commits"] > 0 and ctx["total_prs"] == 0:
+        add(
+            "out-no-prs", 3, "Delivery",
+            f"{ctx['total_commits']} commits but no PRs created",
+            "If you're working on feature branches, ask the agent to "
+            "create PRs to get code reviewed and merged.",
+        )
+
+    # --- Knowledge & goals recommendations ---
+
+    goals_active = mem.get("goals_active", 0)
+    krs_done = mem.get("krs_done", 0)
+    krs_total = mem.get("krs_total", 0)
+
+    if goals_active == 0 and ctx["session_count"] > 5:
+        add(
+            "know-no-goals", 3, "Planning",
+            "No active goals — set goals to track progress",
+            "Define goals with key results in memory/goals.md "
+            "so the dashboard can measure completion rate.",
+        )
+
+    if krs_total > 0:
+        krs_pct = krs_done / krs_total * 100
+        if krs_pct < 30 and goals_active > 0:
+            add(
+                "know-kr-behind", 2, "Planning",
+                f"Only {krs_pct:.0f}% of key results completed — goals at risk",
+                "Review active goals and focus sessions on completing "
+                "key results. Consider breaking large KRs into smaller ones.",
+            )
+
+    followups_pending = mem.get("followups_pending", 0)
+    followups_done = mem.get("followups_done", 0)
+    if followups_pending > 3:
+        total_fu = followups_pending + followups_done
+        pct = int(followups_done / max(total_fu, 1) * 100)
+        add(
+            "know-followups-piling", 2, "Relationships",
+            f"{followups_pending} follow-ups pending ({pct}% done)",
+            "Overdue follow-ups erode trust. Review pending items "
+            "in memory/people/ and resolve or reschedule them.",
+        )
+
+    decisions = mem.get("decisions", 0)
+    if decisions == 0 and ctx["session_count"] > 10:
+        add(
+            "know-no-decisions", 3, "Knowledge",
+            "No decisions recorded this period",
+            "Capture important decisions in daily logs to build "
+            "institutional memory. Use decision-journal skill.",
+        )
+
+    # --- Channel & skill recommendations ---
+
+    unique_tools = len(tool_counts)
+    if unique_tools <= 3 and ctx["total_tool_calls"] > 50:
+        add(
+            "skill-low-diversity", 3, "Skills",
+            f"Only {unique_tools} unique tools used — explore more skills",
+            "You may have useful skills that aren't being triggered. "
+            "Run skills-manager or check available skills list.",
+        )
+
+    # Sort by priority
+    recs.sort(key=lambda r: r["priority"])
+    return recs
+
+
+# ---------------------------------------------------------------------------
 # Reports
 # ---------------------------------------------------------------------------
 
@@ -875,6 +1165,7 @@ def report_outcomes(
     leverage: Dict[str, Any],
     period_days: int,
     fmt: str,
+    index: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Generate an outcomes report showing measurable work accomplished."""
     # Aggregate code/delivery outcomes from sessions
@@ -918,6 +1209,12 @@ def report_outcomes(
     krs_total = memory_outcomes.get("krs_total", 0)
     followups_done = memory_outcomes.get("followups_done", 0)
     followups_pending = memory_outcomes.get("followups_pending", 0)
+
+    # Generate recommendations
+    ctx = _build_context(
+        sessions, memory_outcomes, cron_data, leverage, period_days, index,
+    )
+    recs = generate_recommendations(ctx)
 
     if fmt == "json":
         out: Dict[str, Any] = {
@@ -975,6 +1272,16 @@ def report_outcomes(
                     else None
                 ),
             },
+            "recommendations": [
+                {
+                    "id": r["id"],
+                    "priority": r["priority"],
+                    "category": r["category"],
+                    "message": r["message"],
+                    "detail": r["detail"],
+                }
+                for r in recs
+            ],
         }
         print(json.dumps(out, indent=2))
         return
@@ -1109,6 +1416,15 @@ def report_outcomes(
         print(f"    {'Cost per outcome':<18} {format_cost(total_cost / total_outcomes)}")
         print(f"    {'Outcomes per $1':<18} {total_outcomes / total_cost:.1f}")
 
+    # Recommendations section
+    if recs:
+        print(f"\n  Recommendations")
+        print("  " + "-" * 25)
+        for r in recs:
+            marker = PRIORITY_LABELS.get(r["priority"], "->")
+            print(f"    {marker} [{r['category']}] {r['message']}")
+            print(f"       {r['detail']}")
+
 
 def report_summary(
     sessions: List[Dict[str, Any]],
@@ -1120,6 +1436,12 @@ def report_summary(
     fmt: str,
 ) -> None:
     """Generate a quick summary report including outcomes, automation, and leverage."""
+    # Generate recommendations upfront for both JSON and text
+    ctx = _build_context(
+        sessions, memory_outcomes, cron_data, leverage, period_days, index,
+    )
+    recs = generate_recommendations(ctx)
+
     total_cost = sum(s["cost"] for s in sessions)
     total_messages = sum(s["messages"] for s in sessions)
     total_tools = sum(s["total_tool_calls"] for s in sessions)
@@ -1186,6 +1508,11 @@ def report_summary(
                 "time_saved_mins": leverage.get("time_saved_minutes", 0),
                 "autonomy": leverage.get("avg_autonomy_ratio", 0),
             },
+            "recommendations": [
+                {"priority": r["priority"], "category": r["category"],
+                 "message": r["message"]}
+                for r in recs[:3]
+            ],
         }
         print(json.dumps(out, indent=2))
         return
@@ -1276,6 +1603,14 @@ def report_summary(
     if daily:
         sorted_vals = [float(daily[k]) for k in sorted(daily.keys())]
         print(f"\n  Activity: {spark_line(sorted_vals)}")
+
+    # Top recommendations
+    if recs:
+        top_recs = recs[:3]
+        print()
+        for r in top_recs:
+            marker = PRIORITY_LABELS.get(r["priority"], "->")
+            print(f"  {marker} {r['message']}")
 
 
 # ---------------------------------------------------------------------------
@@ -1376,7 +1711,7 @@ def main() -> int:
     elif args.report == "outcomes":
         report_outcomes(
             sessions, memory_outcomes, cron_data, leverage,
-            period_days, args.format,
+            period_days, args.format, index=index,
         )
     elif args.report == "summary":
         report_summary(

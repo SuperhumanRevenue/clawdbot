@@ -54,6 +54,11 @@ When the user asks for analytics without specifics, generate this:
 🎯 Goals: {active_count} active, {completion_pct}% on track
 
 ⚡ Top skills used: {skill1}, {skill2}, {skill3}
+
+💡 Recommendations:
+   !!! [Cost] Daily spend is $16.40 — consider model routing
+   !! [Quality] No test runs detected across multiple commits
+   -> [Automation] No cron jobs configured — automate recurring work
 ```
 
 ### Cost Report
@@ -135,6 +140,16 @@ Measures actual work accomplished by analyzing tool call inputs and memory files
 - Total outcomes (composite count of all measurable deliverables)
 - Cost per outcome (total cost / total outcomes)
 - Outcomes per dollar (inverse — higher is better)
+
+**Proactive Recommendations** (generated from threshold analysis):
+- Cost optimization: model routing, daily spend alerts
+- Automation opportunities: missing cron jobs, failing jobs to fix
+- Leverage improvements: low autonomy, stuck sessions, batch prompting
+- Quality gaps: no tests run, commits without PRs
+- Planning gaps: no active goals, behind on key results, piling follow-ups
+- Skill discovery: low tool diversity, underused capabilities
+
+Each recommendation has a priority (!!!=critical, !!=important, ->=suggestion), a category, an actionable message, and concrete next steps.
 
 ### Productivity Report
 

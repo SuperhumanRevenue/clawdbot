@@ -394,6 +394,69 @@ ls skills/ | sort > /tmp/all-skills.txt
 comm -23 /tmp/all-skills.txt /tmp/used-tools.txt
 ```
 
+## Proactive Recommendation Rules
+
+The analytics dashboard generates prioritized recommendations by evaluating metrics against thresholds. Each rule checks a condition and produces an actionable suggestion.
+
+### Priority levels
+
+| Priority | Label | Meaning |
+|----------|-------|---------|
+| 1 | `!!!` | Critical — immediate action needed |
+| 2 | `!!` | Important — address this week |
+| 3 | `->` | Suggestion — nice to do when convenient |
+
+### Rule definitions
+
+| ID | Priority | Trigger | Message |
+|----|----------|---------|---------|
+| `cost-high-daily` | 1 | daily_avg_cost > $15 | Route low-complexity tasks to cheaper models |
+| `cost-elevated` | 3 | daily_avg_cost > $5 | Monitor cost trend |
+| `cost-opus-dominant` | 2 | Opus > 80% of model spend | Use Sonnet for routine tasks |
+| `auto-no-cron` | 2 | 0 active cron jobs | Set up automation for recurring work |
+| `auto-cron-failing` | 1 | cron fail rate > 20% | Fix broken cron jobs |
+| `auto-cron-flaky` | 3 | cron fail rate > 5% | Investigate intermittent failures |
+| `lev-low-ratio` | 2 | leverage_ratio < 1.5x with file activity | Give agent broader tasks |
+| `lev-high-autonomy` | 2 | autonomy > 25 actions/request | Check for agent loops |
+| `lev-low-autonomy` | 3 | autonomy < 2 actions/request | Try batch prompts |
+| `out-no-tests` | 2 | 0 test runs + >3 commits | Add test runs to workflow |
+| `out-no-prs` | 3 | commits > 0, PRs = 0 | Create PRs for code review |
+| `know-no-goals` | 3 | 0 active goals + >5 sessions | Set goals in memory/goals.md |
+| `know-kr-behind` | 2 | KR completion < 30% | Focus on completing key results |
+| `know-followups-piling` | 2 | >3 pending follow-ups | Resolve or reschedule follow-ups |
+| `know-no-decisions` | 3 | 0 decisions + >10 sessions | Capture decisions in daily logs |
+| `skill-low-diversity` | 3 | ≤3 unique tools + >50 calls | Explore more available skills |
+
+### How recommendations appear
+
+**In outcomes report** — full detail with category, message, and next steps:
+```
+  Recommendations
+  -------------------------
+    !!! [Cost] Daily spend is $16.40 — consider model routing
+       Route low-complexity tasks to Haiku. Top model claude-opus-4-6 accounts for $14.20.
+    !! [Quality] No test runs detected across multiple commits
+       Consider asking the agent to run tests before committing.
+    -> [Automation] No cron jobs configured — automate recurring work
+       Set up daily-briefing, weekly-insights, or backup jobs.
+```
+
+**In summary report** — compact top 3:
+```
+  !!! Daily spend is $16.40 — consider model routing
+  !! No test runs detected across multiple commits
+  -> No cron jobs configured — automate recurring work
+```
+
+**In JSON** — machine-readable for piping to alerts or dashboards:
+```json
+"recommendations": [
+  {"id": "cost-high-daily", "priority": 1, "category": "Cost",
+   "message": "Daily spend is $16.40 — consider model routing",
+   "detail": "Route low-complexity tasks to Haiku..."}
+]
+```
+
 ## Calculating Metrics from Session JSONL Data
 
 ### JSONL structure
