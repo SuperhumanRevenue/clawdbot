@@ -13,7 +13,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-VAULT_PATH="${1:-${PROJECT_DIR}/vault}"
+
+# Resolve vault path: argument > env var > default
+VAULT_PATH="${1:-${AGENT_VAULT_PATH:-${PROJECT_DIR}/vault}}"
+VAULT_PATH="$(cd "$(dirname "$VAULT_PATH")" 2>/dev/null && pwd)/$(basename "$VAULT_PATH")" 2>/dev/null || VAULT_PATH="$1"
 
 echo "Initializing Agent Memory Vault at: ${VAULT_PATH}"
 echo "============================================="
@@ -35,13 +38,23 @@ for file in "${BOOTSTRAP_FILES[@]}"; do
     src="${PROJECT_DIR}/vault/${file}"
     dst="${VAULT_PATH}/${file}"
 
-    if [ -f "$src" ] && [ ! -f "$dst" ]; then
+    if [ -f "$dst" ]; then
+        echo "  Exists:  ${file} (skipped)"
+    elif [ -f "$src" ]; then
         cp "$src" "$dst"
         echo "  Created: ${file}"
-    elif [ -f "$dst" ]; then
-        echo "  Exists:  ${file} (skipped)"
     else
-        echo "  Missing source: ${file}"
+        # Standalone mode: generate minimal bootstrap file inline
+        echo "---" > "$dst"
+        echo "type: bootstrap" >> "$dst"
+        echo "tags:" >> "$dst"
+        echo "  - agent/core" >> "$dst"
+        echo "---" >> "$dst"
+        echo "" >> "$dst"
+        echo "# ${file%.md}" >> "$dst"
+        echo "" >> "$dst"
+        echo "<!-- Edit this file to configure your agent -->" >> "$dst"
+        echo "  Generated: ${file} (minimal)"
     fi
 done
 

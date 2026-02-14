@@ -60,21 +60,91 @@ Adapted from OpenClaw's proven architecture:
 - **Claude Agent SDK** — TypeScript agent for memory operations
 - **Markdown** — All memory is plain markdown (human-readable, git-friendly)
 
-## Quick Start
+## Standalone Usage
+
+This is a **standalone module** — copy it into any project or use it globally.
+
+### Option 1: Drop into any project
 
 ```bash
-# 1. Initialize the vault
-./scripts/init-vault.sh
+# Copy the whole directory into your project
+cp -r agent-memory/ ~/my-project/agent-memory/
 
-# 2. Install SDK dependencies
-cd sdk && npm install
+# Initialize the vault
+cd ~/my-project/agent-memory
+npm install       # installs SDK dependencies
+npm run build     # compiles TypeScript
 
-# 3. Configure Claude Code hooks
-cp hooks/* ~/.claude/hooks/
+# Initialize a vault
+npx agent-memory init ./vault
+# or: ./scripts/init-vault.sh
 
-# 4. Open vault in Obsidian
-# File > Open Vault > Select agent-memory/vault
+# Copy CLAUDE.md to your project root for Claude Code integration
+cp agent-memory/CLAUDE.md ~/my-project/CLAUDE.md
 ```
+
+### Option 2: Global memory vault
+
+```bash
+# Create a global vault that works across all your projects
+cd agent-memory/sdk && npm install && npm run build
+node dist/cli.js init ~/.agent-memory/vault
+
+# Set in your shell profile (.bashrc, .zshrc):
+export AGENT_VAULT_PATH=~/.agent-memory/vault
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Now use from anywhere:
+node /path/to/agent-memory/sdk/dist/cli.js search "api design"
+node /path/to/agent-memory/sdk/dist/cli.js save "decided to use JWT"
+node /path/to/agent-memory/sdk/dist/cli.js stats
+```
+
+### Option 3: Import as SDK in your own agents
+
+```typescript
+import { MemoryAgent, MemoryManager, MemorySearch } from "@agent-os/memory";
+
+// Use in your own Claude Agent SDK builds
+const agent = new MemoryAgent({
+  vaultPath: "~/.agent-memory/vault",
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+});
+
+// Get tools to register with Claude
+const tools = agent.getTools();
+
+// Build system prompt with full memory context
+const systemPrompt = await agent.buildSystemPrompt("You are a helpful assistant.");
+
+// Handle tool calls from Claude
+const result = await agent.handleToolCall("memory_search", { query: "api design" });
+
+// Or run the full agentic loop
+const response = await agent.run("What did we decide about auth?");
+```
+
+## CLI Commands
+
+```
+agent-memory init [path]      Create a new vault (default: ./vault)
+agent-memory search <query>   Search memory files
+agent-memory save <message>   Save a note to today's daily log
+agent-memory flush            AI-powered memory flush
+agent-memory stats            Show memory statistics
+agent-memory context          Print full session context
+agent-memory run <prompt>     Run the memory agent interactively
+```
+
+## Claude Code Integration
+
+Copy `CLAUDE.md` to your project root. This teaches Claude Code how to use the memory system automatically. Then set:
+
+```bash
+export AGENT_VAULT_PATH=/path/to/your/vault
+```
+
+Claude Code will read MEMORY.md and recent daily logs at session start, and can save important context during sessions.
 
 ## Design Principles
 
@@ -84,3 +154,4 @@ cp hooks/* ~/.claude/hooks/
 4. **Git-friendly** — Version control your agent's memory
 5. **Append-only daily logs** — Never lose context, always accumulate
 6. **Curated long-term** — MEMORY.md is agent-maintained, human-reviewable
+7. **Portable** — Copy into any project or use globally across all builds

@@ -1,0 +1,17 @@
+{
+  "name": "agent-memory",
+  "version": "1.0.0",
+  "description": "Standalone file-backed memory system for AI agents — Obsidian-native, works with any project",
+  "private": true,
+  "scripts": {
+    "build": "cd sdk && npm run build",
+    "dev": "cd sdk && npm run dev",
+    "init": "cd sdk && node dist/cli.js init",
+    "search": "cd sdk && node dist/cli.js search",
+    "save": "cd sdk && node dist/cli.js save",
+    "stats": "cd sdk && node dist/cli.js stats",
+    "flush": "cd sdk && node dist/cli.js flush",
+    "postinstall": "cd sdk && npm install"
+  },
+  "license": "MIT"
+}

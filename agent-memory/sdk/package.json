@@ -1,18 +1,39 @@
 {
-  "name": "agent-memory-sdk",
+  "name": "@agent-os/memory",
   "version": "1.0.0",
-  "description": "Claude Agent SDK memory system — Obsidian-native, file-backed agent memory",
+  "description": "Standalone file-backed agent memory — Obsidian-native, works with any project",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "agent-memory": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./agent": {
+      "import": "./dist/agent.js",
+      "types": "./dist/agent.d.ts"
+    },
+    "./search": {
+      "import": "./dist/memory-search.js",
+      "types": "./dist/memory-search.d.ts"
+    },
+    "./manager": {
+      "import": "./dist/memory-manager.js",
+      "types": "./dist/memory-manager.d.ts"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/index.js",
-    "search": "node dist/index.js search",
-    "flush": "node dist/index.js flush",
-    "save": "node dist/index.js save",
-    "init": "node dist/index.js init"
+    "start": "node dist/cli.js",
+    "search": "node dist/cli.js search",
+    "flush": "node dist/cli.js flush",
+    "save": "node dist/cli.js save",
+    "init": "node dist/cli.js init"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
@@ -25,5 +46,19 @@
   },
   "engines": {
     "node": ">=22.0.0"
-  }
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "keywords": [
+    "agent",
+    "memory",
+    "claude",
+    "obsidian",
+    "markdown",
+    "agent-sdk",
+    "persistent-memory"
+  ],
+  "license": "MIT"
 }
