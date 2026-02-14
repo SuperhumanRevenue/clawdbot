@@ -9,6 +9,12 @@ All memory is plain markdown in an Obsidian-compatible vault.
 
 ## Quick Setup
 
+**Fastest**: Run the interactive setup wizard (asks your name, preferences, sets everything up):
+```bash
+./scripts/onboard.sh
+```
+
+**Or manual setup** (see [GETTING-STARTED.md](GETTING-STARTED.md) for full guide):
 ```bash
 # Option 1: Use as a directory in your project
 cp -r agent-memory/ /path/to/your/project/agent-memory/

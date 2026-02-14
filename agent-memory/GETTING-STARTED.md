@@ -2,8 +2,22 @@
 
 A step-by-step guide to set up persistent memory for your AI agent.
 
-**Time**: ~10 minutes
+**Time**: ~10 minutes (or ~3 minutes with the wizard)
 **What you'll have**: A working memory system that remembers across sessions, browseable in Obsidian.
+
+---
+
+## Fastest Path: Interactive Setup Wizard
+
+If you want to skip the manual steps, run the onboarding wizard. It handles everything — vault init, user profile, agent naming, environment setup, and first memory creation:
+
+```bash
+./scripts/onboard.sh
+```
+
+It will ask you a few questions (name, role, preferences, agent personality) and set everything up. You can open the vault in Obsidian immediately after.
+
+**If you prefer to understand each step**, continue with the manual guide below.
 
 ---
 
