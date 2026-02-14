@@ -1,0 +1,39 @@
+{
+  "name": "@agent-os/heartbeat",
+  "version": "1.0.0",
+  "description": "Periodic data gathering from tools — pluggable, MCP-compatible heartbeat system",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "agent-heartbeat": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js start",
+    "run": "node dist/index.js run",
+    "status": "node dist/index.js status",
+    "health": "node dist/index.js health",
+    "tools": "node dist/index.js tools"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "heartbeat",
+    "agent",
+    "mcp",
+    "tools",
+    "monitoring",
+    "claude"
+  ],
+  "license": "MIT"
+}

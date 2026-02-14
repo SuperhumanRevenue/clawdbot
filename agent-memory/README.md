@@ -47,6 +47,19 @@ agent-memory/
 │   ├── init-vault.sh         # Initialize Obsidian vault
 │   ├── search-memory.sh      # CLI memory search
 │   └── sync-memory.sh        # Sync memory index
+├── heartbeat/                # Periodic data gathering system
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── src/
+│   │   ├── index.ts          # Entry point & CLI
+│   │   ├── runner.ts         # Scheduler & execution engine
+│   │   ├── registry.ts       # Plugin registry
+│   │   ├── mcp.ts            # MCP server bridge
+│   │   ├── types.ts          # Type definitions
+│   │   └── tools/            # 12 tool connectors
+│   └── docs/
+│       ├── architecture.md   # Heartbeat architecture
+│       └── tools-guide.md    # Tool configuration & custom tools
 └── docs/                     # Documentation
     ├── architecture.md       # System architecture
     ├── memory-format.md      # Memory file format spec
@@ -154,6 +167,53 @@ export AGENT_VAULT_PATH=/path/to/your/vault
 ```
 
 Claude Code will read MEMORY.md and recent daily logs at session start, and can save important context during sessions.
+
+## Heartbeat System
+
+A pluggable, periodic data gathering engine that monitors your tools and surfaces what needs attention.
+
+```bash
+cd agent-memory/heartbeat
+npm install && npm run build
+
+# Run one heartbeat cycle
+npm run run
+
+# Start the scheduler (runs every 30m)
+npm run start
+
+# Check tool configuration
+npm run health
+```
+
+### Integrated Tools
+
+| Tool | Category | What it monitors |
+|------|----------|-----------------|
+| Fathom | meetings | Recent recordings, action items |
+| HubSpot | crm | Deals, overdue tasks |
+| Google Drive | documents | Recently modified files |
+| Google Docs | documents | Unresolved comments |
+| Google Sheets | spreadsheets | Data changes |
+| Notion | documents | Recently edited pages |
+| Airtable | spreadsheets | Record changes |
+| Slack | messaging | Unread messages, mentions |
+| Cursor | development | Uncommitted work, git status |
+| Google Calendar* | calendar | Upcoming events |
+| Gmail* | email | Unread emails |
+| Supabase* | database | Table changes, auth signups |
+
+*Planned — disabled by default, enable via `HEARTBEAT_TOOLS`
+
+### How it works
+
+1. Timer fires (configurable interval, active hours)
+2. All enabled tools gather data in parallel
+3. Claude reads the gathered data + your HEARTBEAT.md checklist
+4. If nothing needs attention → `HEARTBEAT_OK` (no alert)
+5. If something needs attention → delivers to console, Slack, or memory vault
+
+See [heartbeat/docs/architecture.md](heartbeat/docs/architecture.md) and [heartbeat/docs/tools-guide.md](heartbeat/docs/tools-guide.md) for details.
 
 ## Design Principles
 
