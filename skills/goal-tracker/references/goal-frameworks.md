@@ -98,42 +98,13 @@ When goals depend on each other, note it:
 ```
 Why: Specific deliverable, measurable KRs, clear deadline, each KR is verifiable.
 
-### Bad goals (and how to fix them)
+### Bad goals and how to fix them
 
-**Too vague:**
-```
-"Improve code quality"
-```
-Fix: "Achieve 80% test coverage on payment module and fix all critical Sentry errors by March 1"
+| Bad Goal | Problem | Fixed Version |
+|----------|---------|---------------|
+| "Improve code quality" | Too vague | "80% test coverage on payment module by March 1" |
+| "Make onboarding better" | Not measurable | "Reduce setup time from 15min to <5min by Feb 28" |
+| "Learn Kubernetes" | No deadline | "Deploy staging on k8s by March 15" |
+| "Fix the login bug" | Task, not goal | "Zero critical auth bugs in production" |
 
-**Not measurable:**
-```
-"Make onboarding better"
-```
-Fix: "Reduce new user setup time from 15 minutes to under 5 minutes by Feb 28"
-
-**No deadline:**
-```
-"Learn Kubernetes"
-```
-Fix: "Deploy staging environment on k8s and document the setup by March 15"
-
-**Too many KRs (unfocused):**
-```
-Key results:
-- [ ] Build API
-- [ ] Write docs
-- [ ] Add tests
-- [ ] Set up CI
-- [ ] Deploy to prod
-- [ ] Add monitoring
-- [ ] Train team
-- [ ] Write blog post
-```
-Fix: Split into 2 goals -- "Ship API v1" (build, test, deploy) and "Operationalize API" (monitoring, docs, training).
-
-**Task disguised as goal:**
-```
-"Fix the login bug"
-```
-This is a task, not a goal. Goals are outcomes. The goal might be "Zero critical auth bugs in production" with this fix as one activity toward it.
+**Too many KRs**: If a goal has >5 KRs, split into 2 goals. "Ship API v1" (build, test, deploy) + "Operationalize API" (monitoring, docs, training).

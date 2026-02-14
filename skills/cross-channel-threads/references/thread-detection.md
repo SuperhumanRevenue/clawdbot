@@ -109,23 +109,13 @@ Two active threads should be merged when:
 - User explicitly says "this is the same as the {topic} thread"
 
 ### Merge process
-1. Identify the older thread as the primary
-2. Append the newer thread's channels and session IDs to the primary
-3. Update "Last active" to the more recent timestamp
-4. Combine Key context from both, deduplicating
-5. Remove the secondary thread entry from active.md
-
-### Merge format in active.md
-```markdown
-## {topic}
-- **Started:** {earliest date} on {first channel}
-- **Last active:** {most recent date} on {most recent channel}
-- **Channels:** slack, terminal, whatsapp (merged from 2 threads)
-- **Key context:** {combined summary, max 3 lines}
-- **Session IDs:** {all session IDs from both threads}
-```
+1. Keep the older thread as primary
+2. Append newer thread's channels and session IDs
+3. Update "Last active" to most recent timestamp
+4. Combine Key context, deduplicating
+5. Remove the secondary entry from active.md
 
 ### Do NOT merge
-- Threads about the same general area but different specific issues ("API auth bug" vs "API rate limiting")
-- Threads involving different people even if the topic is similar
-- Threads where one is clearly resolved and the other is active
+- Same area but different issues ("API auth bug" vs "API rate limiting")
+- Different people, even if topic overlaps
+- One resolved, the other active

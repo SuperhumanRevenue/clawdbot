@@ -111,17 +111,21 @@ For complex outputs (meeting prep, sprint planning), use named sections:
 
 ### Conflict resolution
 
-When skills return contradictory information:
-- **Prefer knowledge-distiller** over raw session recall (curated vs raw)
-- **Prefer decision-journal** over knowledge-distiller for decisions (authoritative source)
-- **Prefer relationship-crm** over session logs for people data (structured vs unstructured)
-- If genuine conflict exists, surface both with dates: "Note: {skill A} says X (from {date}), but {skill B} says Y (from {date})"
+When skills return contradictory information, prefer in this order:
+1. **decision-journal** -- authoritative for decisions
+2. **knowledge-distiller** -- curated, over raw recall
+3. **relationship-crm** -- structured, over session logs
+
+If genuine conflict: surface both with dates instead of silently picking one.
 
 ### Channel-aware formatting
 
 Apply after composition, before delivery:
-- **Terminal**: Full markdown, sections, tables, code blocks
-- **Slack/Discord**: Shorter sections, use threads for overflow, bold key points
-- **WhatsApp/Signal**: 3-5 bullet points max, no tables, no code blocks
-- **iMessage**: 1-2 sentences, link to full output if needed
-- **Email**: Formal structure, full detail, proper greeting/sign-off
+
+| Channel | Format |
+|---------|--------|
+| Terminal | Full markdown, sections, tables, code blocks |
+| Slack/Discord | Shorter sections, bold key points, threads for overflow |
+| WhatsApp/Signal | 3-5 bullets max, no tables or code blocks |
+| iMessage | 1-2 sentences, link to full output if needed |
+| Email | Formal structure, full detail, greeting/sign-off |
