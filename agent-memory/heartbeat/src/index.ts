@@ -16,6 +16,7 @@
 // Library exports
 export { HeartbeatRunner } from "./runner.js";
 export { ToolRegistry, createDefaultRegistry } from "./registry.js";
+export { HeartbeatState } from "./state.js";
 export { McpBridge } from "./mcp.js";
 export {
   registerAllTools,
@@ -51,6 +52,14 @@ export type {
   McpServerConfig,
   PluginRegistry,
 } from "./types.js";
+
+export type {
+  StateData,
+  ToolStateData,
+  SeenEntry,
+  DiffedResult,
+  LingeringItem,
+} from "./state.js";
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -119,7 +128,7 @@ async function main() {
         console.log(`[${time}] ${evt.status}: ${evt.toolsChecked.join(", ")} (${evt.durationMs}ms)`);
         if (evt.preview) console.log(`  ${evt.preview}`);
       });
-      runner.start();
+      await runner.start();
       console.log("Heartbeat running. Press Ctrl+C to stop.");
       process.on("SIGINT", () => { runner.stop(); process.exit(0); });
       // Keep alive

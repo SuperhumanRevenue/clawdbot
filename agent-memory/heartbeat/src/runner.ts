@@ -3,13 +3,16 @@
  *
  * Adapted from OpenClaw's heartbeat-runner.ts.
  * Orchestrates the full heartbeat cycle:
- * 1. Schedule → 2. Gather from tools → 3. Agent processes → 4. Deliver
+ * 1. Schedule → 2. Gather from tools → 3. Diff against notepad →
+ * 4. Agent processes NEW items only → 5. Deliver → 6. Save state
  */
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import { ToolRegistry } from "./registry.js";
+import { HeartbeatState } from "./state.js";
+import type { DiffedResult } from "./state.js";
 import type {
   HeartbeatConfig,
   HeartbeatRunResult,
@@ -23,21 +26,26 @@ const HEARTBEAT_OK = "HEARTBEAT_OK";
 
 const DEFAULT_PROMPT = `You are running a periodic heartbeat check. You have gathered data from various tools and services.
 
-Review the gathered data below. Your job:
+Your job:
 
-1. Read HEARTBEAT.md for your current checklist (if it exists)
-2. Analyze the gathered data for anything that needs attention
-3. If nothing needs attention, reply exactly: HEARTBEAT_OK
-4. If something needs attention, summarize the alerts and recommend actions
+1. Review the NEW items below — these are things you haven't told the user about yet
+2. Check for lingering items — these were already reported but haven't been resolved
+3. Read HEARTBEAT.md for the user's checklist (if provided)
+4. If nothing needs attention, reply exactly: HEARTBEAT_OK
+5. If something needs attention, summarize clearly and recommend actions
 
-Be concise. Only surface things that genuinely need the user's attention.`;
+Rules:
+- Only surface things that genuinely need the user's attention
+- For lingering items, only re-mention them if they've been sitting too long (use the "unresolved for" duration to judge)
+- Be concise — a few sentences, not paragraphs
+- Prioritize: new urgent items > new normal items > long-lingering items`;
 
 export class HeartbeatRunner {
   private config: HeartbeatConfig;
   private registry: ToolRegistry;
   private client: Anthropic;
+  private state: HeartbeatState;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private lastRun: Date | null = null;
   private running = false;
   private listeners: Array<(event: HeartbeatEvent) => void> = [];
 
@@ -47,6 +55,7 @@ export class HeartbeatRunner {
     this.client = new Anthropic({
       apiKey: config.anthropicApiKey,
     });
+    this.state = new HeartbeatState(config.vaultPath);
   }
 
   // -------------------------------------------------------------------------
@@ -54,11 +63,18 @@ export class HeartbeatRunner {
   // -------------------------------------------------------------------------
 
   /** Start the heartbeat scheduler */
-  start(): void {
+  async start(): Promise<void> {
     const intervalMs = this.parseInterval(this.config.every);
     if (intervalMs <= 0) {
       console.log("Heartbeat disabled (interval: 0).");
       return;
+    }
+
+    // Load state from disk so we survive restarts
+    await this.state.load();
+    const lastRun = this.state.getLastRun();
+    if (lastRun) {
+      console.log(`Resuming — last run was ${lastRun.toISOString()}`);
     }
 
     console.log(`Heartbeat started: every ${this.config.every} (${intervalMs}ms)`);
@@ -84,6 +100,9 @@ export class HeartbeatRunner {
     const start = Date.now();
 
     try {
+      // Load state (in case another process updated it, or first run)
+      await this.state.load();
+
       // Pre-flight: check active hours
       if (!this.isWithinActiveHours()) {
         const result: HeartbeatRunResult = {
@@ -106,16 +125,25 @@ export class HeartbeatRunner {
       const enabledTools = this.registry.listEnabled(this.config);
       const gatherResults = await this.gatherAll(enabledTools, checklist);
 
-      // Step 2: Check if there's anything to process
-      const allAlerts = gatherResults.flatMap((r) => r.alerts);
-      const hasContent = gatherResults.some(
-        (r) => r.items.length > 0 || r.alerts.length > 0
+      // Step 2: Diff against state — what's new vs. already reported?
+      const diffedResults = gatherResults.map((r) => this.state.diff(r));
+
+      // Step 3: Check if there's anything new to process
+      const hasNew = diffedResults.some(
+        (d) => d.newItems.length > 0 || d.newAlerts.length > 0
+      );
+      const hasLingering = diffedResults.some(
+        (d) => d.lingeringItems.length > 0 || d.lingeringAlerts.length > 0
       );
 
-      if (!hasContent && this.isChecklistEmpty(checklist)) {
+      if (!hasNew && !hasLingering && this.isChecklistEmpty(checklist)) {
+        // Nothing to report — save state and skip
+        this.state.markRun();
+        await this.state.save();
+
         const result: HeartbeatRunResult = {
           status: "skipped",
-          reason: "no data and empty checklist",
+          reason: "no new data",
           timestamp: new Date(),
           durationMs: Date.now() - start,
           toolResults: gatherResults,
@@ -123,18 +151,26 @@ export class HeartbeatRunner {
           delivered: false,
         };
         this.emit("ok", enabledTools.map((t) => t.id), 0, result.durationMs);
-        this.lastRun = new Date();
         return result;
       }
 
-      // Step 3: Agent processes gathered data
+      // Step 4: Agent processes the diff (new + lingering with context)
       const agentResponse = await this.processWithAgent(
-        gatherResults,
+        diffedResults,
         checklist
       );
 
-      // Step 4: Check for HEARTBEAT_OK
+      // Step 5: Check for HEARTBEAT_OK
       const isOk = this.isHeartbeatOk(agentResponse);
+
+      // Save state regardless — we've noted what we've seen
+      this.state.markRun();
+      await this.state.save();
+
+      const allAlerts = [
+        ...diffedResults.flatMap((d) => d.newAlerts),
+        ...diffedResults.flatMap((d) => d.lingeringAlerts),
+      ];
 
       if (isOk) {
         const result: HeartbeatRunResult = {
@@ -147,14 +183,13 @@ export class HeartbeatRunner {
           delivered: false,
         };
         this.emit("ok", enabledTools.map((t) => t.id), allAlerts.length, result.durationMs);
-        this.lastRun = new Date();
         return result;
       }
 
-      // Step 5: Deliver alerts
+      // Step 6: Deliver alerts
       const delivered = await this.deliver(agentResponse, allAlerts);
 
-      // Step 6: Save to memory if configured
+      // Step 7: Save to memory if configured
       if (this.config.delivery?.saveToMemory) {
         await this.saveToMemory(agentResponse, gatherResults);
       }
@@ -170,7 +205,6 @@ export class HeartbeatRunner {
       };
 
       this.emit("alert", enabledTools.map((t) => t.id), allAlerts.length, result.durationMs, agentResponse.slice(0, 200));
-      this.lastRun = new Date();
       return result;
     } catch (err) {
       const result: HeartbeatRunResult = {
@@ -205,9 +239,11 @@ export class HeartbeatRunner {
     tools: Array<{ id: string; gather: (ctx: GatherContext) => Promise<GatherResult> }>,
     checklist: string[]
   ): Promise<GatherResult[]> {
+    const lastRun = this.state.getLastRun();
+
     const ctx: GatherContext = {
       now: new Date(),
-      lastRun: this.lastRun,
+      lastRun,
       checklist,
       config: this.config.tools ?? {},
       vaultPath: this.config.vaultPath,
@@ -249,38 +285,17 @@ export class HeartbeatRunner {
   }
 
   // -------------------------------------------------------------------------
-  // Internal: Agent processing
+  // Internal: Agent processing (with diff awareness)
   // -------------------------------------------------------------------------
 
   private async processWithAgent(
-    gatherResults: GatherResult[],
+    diffedResults: DiffedResult[],
     checklist: string[]
   ): Promise<string> {
     const prompt = this.config.prompt ?? DEFAULT_PROMPT;
     const model = this.config.model ?? "claude-sonnet-4-5-20250929";
 
-    // Build data summary for the agent
-    const dataSummary = gatherResults
-      .map((r) => {
-        const header = `### ${r.toolId} ${r.success ? "" : "(FAILED)"}`;
-        const summary = r.summary;
-        const items = r.items
-          .map((i) => `- [${i.priority}] ${i.title}: ${i.content}`)
-          .join("\n");
-        const alerts = r.alerts
-          .map((a) => `- [${a.severity}] ${a.title}: ${a.description}`)
-          .join("\n");
-
-        return [
-          header,
-          summary,
-          items ? `\nItems:\n${items}` : "",
-          alerts ? `\nAlerts:\n${alerts}` : "",
-        ]
-          .filter(Boolean)
-          .join("\n");
-      })
-      .join("\n\n---\n\n");
+    const dataSummary = this.buildDiffSummary(diffedResults);
 
     const checklistSection =
       checklist.length > 0
@@ -295,12 +310,80 @@ export class HeartbeatRunner {
       messages: [
         {
           role: "user",
-          content: `${prompt}\n\n## Gathered Data\n\n${dataSummary}${checklistSection}${currentTime}`,
+          content: `${prompt}\n\n${dataSummary}${checklistSection}${currentTime}`,
         },
       ],
     });
 
     return response.content[0].type === "text" ? response.content[0].text : "";
+  }
+
+  /**
+   * Build a summary that clearly separates new items from lingering ones.
+   * This is what makes the prompt 10x better — Claude can see the diff.
+   */
+  private buildDiffSummary(diffedResults: DiffedResult[]): string {
+    const sections: string[] = [];
+
+    // Count totals for a quick overview
+    const totalNew = diffedResults.reduce((n, d) => n + d.newItems.length + d.newAlerts.length, 0);
+    const totalLingering = diffedResults.reduce((n, d) => n + d.lingeringItems.length + d.lingeringAlerts.length, 0);
+
+    sections.push(`## Summary: ${totalNew} new, ${totalLingering} unchanged since last check\n`);
+
+    // New items section — this is what Claude should focus on
+    const newSections: string[] = [];
+    for (const d of diffedResults) {
+      if (d.newItems.length === 0 && d.newAlerts.length === 0) continue;
+
+      const lines: string[] = [`### ${d.toolId} ${d.success ? "" : "(FAILED)"}`];
+
+      for (const item of d.newItems) {
+        lines.push(`- [${item.priority}] ${item.title}: ${item.content}`);
+      }
+      for (const alert of d.newAlerts) {
+        lines.push(`- [${alert.severity}] ${alert.title}: ${alert.description}`);
+      }
+
+      newSections.push(lines.join("\n"));
+    }
+
+    if (newSections.length > 0) {
+      sections.push(`## NEW (not yet reported to user)\n\n${newSections.join("\n\n")}`);
+    } else {
+      sections.push("## NEW\n\nNothing new since last check.");
+    }
+
+    // Lingering items section — already reported, still unresolved
+    const lingeringSections: string[] = [];
+    for (const d of diffedResults) {
+      if (d.lingeringItems.length === 0 && d.lingeringAlerts.length === 0) continue;
+
+      const lines: string[] = [`### ${d.toolId}`];
+
+      for (const li of d.lingeringItems) {
+        const age = formatAge(li.firstSeen);
+        lines.push(`- [${li.item.priority}] ${li.item.title}: ${li.item.content} (unresolved for ${age}, reported ${li.cycleCount}x)`);
+      }
+      for (const alert of d.lingeringAlerts) {
+        lines.push(`- [${alert.severity}] ${alert.title}: ${alert.description} (still active)`);
+      }
+
+      lingeringSections.push(lines.join("\n"));
+    }
+
+    if (lingeringSections.length > 0) {
+      sections.push(`## UNCHANGED (already reported, still present)\n\n${lingeringSections.join("\n\n")}`);
+    }
+
+    // Failed tools
+    const failed = diffedResults.filter((d) => !d.success);
+    if (failed.length > 0) {
+      const failLines = failed.map((d) => `- ${d.toolId}: ${d.error ?? d.summary}`);
+      sections.push(`## ERRORS\n\n${failLines.join("\n")}`);
+    }
+
+    return sections.join("\n\n");
   }
 
   // -------------------------------------------------------------------------
@@ -517,4 +600,22 @@ export class HeartbeatRunner {
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+
+function formatAge(since: Date): string {
+  const ms = Date.now() - since.getTime();
+  const minutes = Math.floor(ms / 60000);
+
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m`;
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
 }
