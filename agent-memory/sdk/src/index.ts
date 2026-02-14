@@ -33,6 +33,24 @@ export { MemoryFlush } from "./memory-flush.js";
 export { SessionMemory } from "./session-memory.js";
 export { DailyLogManager } from "./daily-log.js";
 
+// Channel adapters
+export {
+  SlackMemoryAdapter,
+  CursorMemoryAdapter,
+  TerminalMemoryAdapter,
+  createMemoryChannelAdapter,
+} from "./adapters/index.js";
+export type {
+  MemoryChannelAdapterId,
+  MemoryChannelAdapter,
+  SlackBlock,
+  SlackText,
+  SlackElement,
+  SlackAttachment,
+  CursorPanel,
+  CursorAnnotation,
+} from "./adapters/index.js";
+
 // Types
 export type {
   MemoryConfig,
