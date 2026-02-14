@@ -1,56 +1,95 @@
 /**
- * Memory Channel Adapters — Entry Point
+ * Memory Communication Channel Adapters — Entry Point
  *
- * Channel-specific adapters that bridge the agent memory system
- * to different delivery channels (Slack, Cursor IDE, Terminal).
+ * Three channels you can use to converse with the memory agent:
  *
- * Each adapter formats memory search results, bootstrap context,
- * session saves, and flush notifications for its target channel.
+ * - **Slack**: Bot that listens via Socket Mode, responds in channels/DMs/threads
+ * - **Cursor**: JSON-RPC server or direct API for Cursor IDE integration
+ * - **Terminal**: Interactive REPL on your desktop terminal with /commands
+ *
+ * Each adapter wraps the MemoryAgent, tracks session messages, and
+ * auto-saves conversations to the vault on disconnect.
  */
 
-export { SlackMemoryAdapter } from "./slack-adapter.js";
+export { SlackChannelAdapter } from "./slack-adapter.js";
 export type {
-  SlackBlock,
-  SlackText,
-  SlackElement,
-  SlackAttachment,
+  SlackChannelConfig,
+  SlackIncomingMessage,
+  SlackOutgoingMessage,
 } from "./slack-adapter.js";
 
-export { CursorMemoryAdapter } from "./cursor-adapter.js";
-export type { CursorPanel, CursorAnnotation } from "./cursor-adapter.js";
+export { CursorChannelAdapter } from "./cursor-adapter.js";
+export type {
+  CursorChannelConfig,
+  CursorRequest,
+  CursorResponse,
+} from "./cursor-adapter.js";
 
-export { TerminalMemoryAdapter } from "./terminal-adapter.js";
+export { TerminalChannelAdapter } from "./terminal-adapter.js";
+export type { TerminalChannelConfig } from "./terminal-adapter.js";
 
 // ---------------------------------------------------------------------------
-// Adapter factory
+// Shared channel interface
 // ---------------------------------------------------------------------------
 
-export type MemoryChannelAdapterId = "slack" | "cursor" | "terminal";
+export type ChannelAdapterId = "slack" | "cursor" | "terminal";
 
-export type MemoryChannelAdapter =
-  | SlackMemoryAdapter
-  | CursorMemoryAdapter
-  | TerminalMemoryAdapter;
+export type ChannelAdapter =
+  | SlackChannelAdapter
+  | CursorChannelAdapter
+  | TerminalChannelAdapter;
 
-import { SlackMemoryAdapter } from "./slack-adapter.js";
-import { CursorMemoryAdapter } from "./cursor-adapter.js";
-import { TerminalMemoryAdapter } from "./terminal-adapter.js";
+import type { MemoryConfig } from "../types.js";
+import { SlackChannelAdapter } from "./slack-adapter.js";
+import { CursorChannelAdapter } from "./cursor-adapter.js";
+import { TerminalChannelAdapter } from "./terminal-adapter.js";
 
 /**
- * Create a memory channel adapter by ID.
+ * Create a channel adapter by ID.
+ * Each channel provides `send(message)` to talk to the agent
+ * and lifecycle methods to start/stop the connection.
  */
-export function createMemoryChannelAdapter(
-  channelId: MemoryChannelAdapterId,
-  options?: { color?: boolean },
-): MemoryChannelAdapter {
+export function createChannelAdapter(
+  channelId: ChannelAdapterId,
+  config: {
+    memoryConfig: MemoryConfig;
+    // Slack-specific
+    botToken?: string;
+    appToken?: string;
+    allowedChannels?: string[];
+    allowedUsers?: string[];
+    // Cursor-specific
+    workspacePath?: string;
+    // Terminal-specific
+    color?: boolean;
+    prompt?: string;
+    botName?: string;
+  },
+): ChannelAdapter {
   switch (channelId) {
     case "slack":
-      return new SlackMemoryAdapter();
+      return new SlackChannelAdapter({
+        botToken: config.botToken ?? "",
+        appToken: config.appToken ?? "",
+        memoryConfig: config.memoryConfig,
+        allowedChannels: config.allowedChannels,
+        allowedUsers: config.allowedUsers,
+      });
     case "cursor":
-      return new CursorMemoryAdapter();
+      return new CursorChannelAdapter({
+        memoryConfig: config.memoryConfig,
+        workspacePath: config.workspacePath,
+      });
     case "terminal":
-      return new TerminalMemoryAdapter(options);
+      return new TerminalChannelAdapter({
+        memoryConfig: config.memoryConfig,
+        color: config.color,
+        prompt: config.prompt,
+        botName: config.botName,
+      });
     default:
-      return new TerminalMemoryAdapter(options);
+      return new TerminalChannelAdapter({
+        memoryConfig: config.memoryConfig,
+      });
   }
 }

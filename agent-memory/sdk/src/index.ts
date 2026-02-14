@@ -33,22 +33,23 @@ export { MemoryFlush } from "./memory-flush.js";
 export { SessionMemory } from "./session-memory.js";
 export { DailyLogManager } from "./daily-log.js";
 
-// Channel adapters
+// Communication channel adapters
 export {
-  SlackMemoryAdapter,
-  CursorMemoryAdapter,
-  TerminalMemoryAdapter,
-  createMemoryChannelAdapter,
+  SlackChannelAdapter,
+  CursorChannelAdapter,
+  TerminalChannelAdapter,
+  createChannelAdapter,
 } from "./adapters/index.js";
 export type {
-  MemoryChannelAdapterId,
-  MemoryChannelAdapter,
-  SlackBlock,
-  SlackText,
-  SlackElement,
-  SlackAttachment,
-  CursorPanel,
-  CursorAnnotation,
+  ChannelAdapterId,
+  ChannelAdapter,
+  SlackChannelConfig,
+  SlackIncomingMessage,
+  SlackOutgoingMessage,
+  CursorChannelConfig,
+  CursorRequest,
+  CursorResponse,
+  TerminalChannelConfig,
 } from "./adapters/index.js";
 
 // Types

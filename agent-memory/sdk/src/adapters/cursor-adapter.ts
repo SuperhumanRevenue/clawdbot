@@ -1,249 +1,317 @@
 /**
- * Cursor Memory Channel Adapter
+ * Cursor IDE Communication Channel Adapter
  *
- * Bridges the agent memory system to the Cursor IDE.
- * Formats memory search results, bootstrap context, and session summaries
- * as rich markdown optimized for Cursor's inline chat and panel rendering.
+ * Lets you converse with the memory agent from within Cursor IDE.
+ * Runs a local JSON-RPC server that a Cursor extension can connect to,
+ * or can be used directly via the programmatic API for inline chat integration.
  *
- * Cursor uses VS Code's markdown rendering engine, so we can leverage
- * collapsible details, markdown tables, and code blocks for structured output.
+ * Supports two modes:
+ * 1. **Server mode**: Starts a local HTTP server that accepts JSON-RPC requests
+ *    from a Cursor extension. Use `channel.startServer(port)`.
+ * 2. **Direct mode**: Call `channel.send(message)` programmatically from a
+ *    Cursor extension's TypeScript code. No server needed.
+ *
+ * Usage (server mode):
+ *   const channel = new CursorChannelAdapter({
+ *     memoryConfig: { vaultPath: "./vault", anthropicApiKey: "..." },
+ *   });
+ *   await channel.startServer(9120);
+ *
+ * Usage (direct mode):
+ *   const channel = new CursorChannelAdapter({
+ *     memoryConfig: { vaultPath: "./vault", anthropicApiKey: "..." },
+ *   });
+ *   const reply = await channel.send("What did we decide about the API?");
  */
 
-import type { MemoryFile, SearchResult, BootstrapFile } from "../types.js";
+import { EventEmitter } from "node:events";
+import * as http from "node:http";
+import type { MemoryConfig, SessionMessage } from "../types.js";
+import { MemoryAgent } from "../agent.js";
 
 // ---------------------------------------------------------------------------
-// Cursor panel types
+// Types
 // ---------------------------------------------------------------------------
 
-export interface CursorPanel {
-  title: string;
-  content: string;
-  collapsed?: boolean;
-  language?: string;
+export interface CursorChannelConfig {
+  /** Memory system configuration */
+  memoryConfig: MemoryConfig;
+  /** Workspace root path (for file context) */
+  workspacePath?: string;
+  /** Session identifier (default: auto-generated) */
+  sessionId?: string;
+  /** Maximum response length (default: 16000 for IDE panels) */
+  maxResponseLength?: number;
 }
 
-export interface CursorAnnotation {
-  file?: string;
-  line?: number;
-  message: string;
-  severity?: "info" | "warning" | "error";
+export interface CursorRequest {
+  id: string | number;
+  method: string;
+  params: {
+    message?: string;
+    filePath?: string;
+    selection?: string;
+    query?: string;
+    [key: string]: unknown;
+  };
+}
+
+export interface CursorResponse {
+  id: string | number;
+  result?: {
+    text: string;
+    metadata?: Record<string, unknown>;
+  };
+  error?: {
+    code: number;
+    message: string;
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Constants
+// Cursor Communication Channel
 // ---------------------------------------------------------------------------
 
-const CURSOR_INLINE_LIMIT = 8000;
-const CURSOR_PANEL_LIMIT = 16000;
-
-// ---------------------------------------------------------------------------
-// Cursor Memory Channel Adapter
-// ---------------------------------------------------------------------------
-
-export class CursorMemoryAdapter {
+export class CursorChannelAdapter extends EventEmitter {
   readonly channelId = "cursor" as const;
-  readonly supportsEmbeds = true;
-  readonly supportsBlocks = false;
-  readonly supportsThreads = false;
-  readonly textChunkLimit = CURSOR_INLINE_LIMIT;
+
+  private config: CursorChannelConfig;
+  private agent: MemoryAgent;
+  private sessionMessages: SessionMessage[] = [];
+  private server: http.Server | null = null;
+  private sessionId: string;
+  private running = false;
+
+  constructor(config: CursorChannelConfig) {
+    super();
+    this.config = config;
+    this.agent = new MemoryAgent(config.memoryConfig);
+    this.sessionId = config.sessionId ?? `cursor-${Date.now()}`;
+  }
+
+  // -------------------------------------------------------------------------
+  // Direct mode — call from Cursor extension code
+  // -------------------------------------------------------------------------
 
   /**
-   * Build cross-context embed for Cursor (markdown callout).
+   * Send a message to the memory agent and get a response.
+   * This is the simplest way to integrate — call directly from
+   * a Cursor extension command or inline chat provider.
    */
-  buildCrossContextEmbeds(originLabel: string): CursorPanel[] {
-    return [
-      {
-        title: "Memory Context",
-        content: `> **Source:** ${originLabel}\n`,
-        collapsed: false,
-      },
-    ];
+  async send(message: string): Promise<string> {
+    if (!message.trim()) return "";
+
+    this.sessionMessages.push({
+      role: "user",
+      content: message,
+      timestamp: new Date(),
+    });
+
+    const response = await this.agent.run(message);
+
+    this.sessionMessages.push({
+      role: "assistant",
+      content: response,
+      timestamp: new Date(),
+    });
+
+    this.emit("message_processed", {
+      sessionId: this.sessionId,
+      responseLength: response.length,
+    });
+
+    return response;
   }
 
   /**
-   * Format a memory search result for Cursor inline chat.
+   * Send a message with file context (the currently open file + selection).
+   * The file context is prepended to the message so the agent has workspace awareness.
    */
-  formatSearchResult(result: SearchResult, index: number): string {
-    const { file, score, excerpts } = result;
-    const lines: string[] = [];
+  async sendWithContext(params: {
+    message: string;
+    filePath?: string;
+    selection?: string;
+    language?: string;
+  }): Promise<string> {
+    const contextParts: string[] = [];
 
-    lines.push(`### ${index + 1}. ${file.name} \`score: ${score.toFixed(2)}\``);
-    lines.push("");
-
-    // Metadata line
-    const meta: string[] = [];
-    if (file.meta.date) meta.push(`**Date:** ${file.meta.date}`);
-    if (file.meta.tags?.length) meta.push(`**Tags:** ${file.meta.tags.map((t) => `\`${t}\``).join(" ")}`);
-    if (file.meta.source) meta.push(`**Source:** ${file.meta.source}`);
-    if (meta.length > 0) {
-      lines.push(meta.join(" | "));
-      lines.push("");
+    if (params.filePath) {
+      contextParts.push(`[File: ${params.filePath}]`);
+    }
+    if (params.selection) {
+      const lang = params.language ?? "";
+      contextParts.push(`\`\`\`${lang}\n${params.selection}\n\`\`\``);
     }
 
-    // Excerpts as blockquotes
-    for (const excerpt of excerpts.slice(0, 3)) {
-      lines.push(excerpt.split("\n").map((l) => `> ${l}`).join("\n"));
-      lines.push("");
-    }
+    const fullMessage = contextParts.length > 0
+      ? `${contextParts.join("\n")}\n\n${params.message}`
+      : params.message;
 
-    return lines.join("\n");
+    return this.send(fullMessage);
   }
 
+  // -------------------------------------------------------------------------
+  // Server mode — JSON-RPC over HTTP
+  // -------------------------------------------------------------------------
+
   /**
-   * Format multiple search results for Cursor.
+   * Start a local HTTP server that accepts JSON-RPC requests.
+   * A Cursor extension connects to this to relay chat messages.
    */
-  formatSearchResults(results: SearchResult[]): string {
-    if (results.length === 0) {
-      return "*No memory entries found matching your query.*";
-    }
+  async startServer(port: number = 9120): Promise<void> {
+    if (this.running) return;
 
-    const sections: string[] = [
-      `## Memory Search Results (${results.length})`,
-      "",
-    ];
+    this.server = http.createServer(async (req, res) => {
+      // CORS for local Cursor extension
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-    for (let i = 0; i < results.length; i++) {
-      sections.push(this.formatSearchResult(results[i], i));
-      if (i < results.length - 1) {
-        sections.push("---");
-        sections.push("");
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
+        return;
       }
+
+      if (req.method !== "POST") {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+        return;
+      }
+
+      try {
+        const body = await readBody(req);
+        const request = JSON.parse(body) as CursorRequest;
+        const response = await this.handleRpcRequest(request);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(response));
+      } catch (err) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          id: null,
+          error: { code: -32700, message: "Parse error" },
+        }));
+      }
+    });
+
+    await new Promise<void>((resolve) => {
+      this.server!.listen(port, "127.0.0.1", () => {
+        this.running = true;
+        this.emit("ready", { port });
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Stop the JSON-RPC server and save the session.
+   */
+  async stopServer(): Promise<void> {
+    if (!this.running) return;
+
+    if (this.sessionMessages.length > 0) {
+      await this.agent.saveSession(this.sessionId, "cursor", this.sessionMessages);
+      this.sessionMessages = [];
     }
 
-    return sections.join("\n");
-  }
-
-  /**
-   * Format a memory file as a collapsible Cursor panel.
-   */
-  formatMemoryFile(file: MemoryFile): CursorPanel {
-    const metaLines: string[] = [];
-    if (file.meta.date) metaLines.push(`**Date:** ${file.meta.date}`);
-    if (file.meta.type) metaLines.push(`**Type:** ${file.meta.type}`);
-    if (file.meta.tags?.length) {
-      metaLines.push(`**Tags:** ${file.meta.tags.map((t) => `\`${t}\``).join(" ")}`);
+    if (this.server) {
+      await new Promise<void>((resolve) => {
+        this.server!.close(() => resolve());
+      });
+      this.server = null;
     }
 
-    const content = [
-      metaLines.length > 0 ? metaLines.join(" | ") : "",
-      "",
-      file.content,
-    ]
-      .filter(Boolean)
-      .join("\n");
-
-    return {
-      title: file.name,
-      content: truncateForCursor(content, CURSOR_PANEL_LIMIT),
-      collapsed: false,
-    };
+    this.running = false;
+    this.emit("disconnected");
   }
 
   /**
-   * Format memory file as inline markdown (for chat responses).
+   * Whether the server is currently running.
    */
-  formatMemoryFileInline(file: MemoryFile): string {
-    const lines: string[] = [`## ${file.name}`, ""];
+  isRunning(): boolean {
+    return this.running;
+  }
 
-    if (file.meta.date) lines.push(`**Date:** ${file.meta.date}`);
-    if (file.meta.type) lines.push(`**Type:** ${file.meta.type}`);
-    if (file.meta.tags?.length) {
-      lines.push(`**Tags:** ${file.meta.tags.map((t) => `\`${t}\``).join(" ")}`);
+  // -------------------------------------------------------------------------
+  // JSON-RPC handler
+  // -------------------------------------------------------------------------
+
+  private async handleRpcRequest(request: CursorRequest): Promise<CursorResponse> {
+    const { id, method, params } = request;
+
+    switch (method) {
+      case "chat": {
+        const message = params.message ?? "";
+        if (params.filePath || params.selection) {
+          const text = await this.sendWithContext({
+            message,
+            filePath: params.filePath,
+            selection: params.selection,
+          });
+          return { id, result: { text } };
+        }
+        const text = await this.send(message);
+        return { id, result: { text } };
+      }
+
+      case "search": {
+        const query = params.query ?? params.message ?? "";
+        const result = await this.agent.handleToolCall("memory_search", {
+          query,
+          max_results: 6,
+        });
+        return { id, result: { text: result } };
+      }
+
+      case "save": {
+        const content = params.message ?? "";
+        const result = await this.agent.handleToolCall("memory_write", {
+          content,
+          slug: params.slug,
+        });
+        return { id, result: { text: result } };
+      }
+
+      case "stats": {
+        const result = await this.agent.handleToolCall("memory_stats", {});
+        return { id, result: { text: result } };
+      }
+
+      case "ping": {
+        return {
+          id,
+          result: {
+            text: "pong",
+            metadata: { sessionId: this.sessionId, running: this.running },
+          },
+        };
+      }
+
+      default:
+        return {
+          id,
+          error: { code: -32601, message: `Unknown method: ${method}` },
+        };
     }
-    lines.push("");
-    lines.push(file.content);
+  }
 
-    return truncateForCursor(lines.join("\n"), CURSOR_INLINE_LIMIT);
+  // -------------------------------------------------------------------------
+  // Session management
+  // -------------------------------------------------------------------------
+
+  /**
+   * Manually flush the current session to memory (without stopping).
+   */
+  async flushSession(): Promise<string | null> {
+    if (this.sessionMessages.length === 0) return null;
+    return this.agent.flushMemory(this.sessionMessages);
   }
 
   /**
-   * Format bootstrap context for Cursor (session start).
-   * Uses collapsible details elements for each bootstrap file.
+   * Get the current session message count.
    */
-  formatBootstrapContext(files: BootstrapFile[]): string {
-    const loaded = files.filter((f) => f.exists);
-    if (loaded.length === 0) {
-      return "*No bootstrap files loaded.*";
-    }
-
-    const sections: string[] = [
-      `*Loaded ${loaded.length} bootstrap file(s)*`,
-      "",
-    ];
-
-    for (const file of loaded) {
-      sections.push(
-        `<details>`,
-        `<summary><code>${file.name}</code></summary>`,
-        "",
-        file.content,
-        "",
-        `</details>`,
-        "",
-      );
-    }
-
-    return sections.join("\n");
-  }
-
-  /**
-   * Format a session save confirmation for Cursor.
-   */
-  formatSessionSave(filePath: string, slug: string): string {
-    return [
-      `> **Session saved**`,
-      `> File: \`${filePath}\``,
-      `> Topic: *${slug}*`,
-    ].join("\n");
-  }
-
-  /**
-   * Format a memory flush notification for Cursor.
-   */
-  formatMemoryFlush(filePath: string): string {
-    return `> **Memory flushed** before context compaction \`${filePath}\``;
-  }
-
-  /**
-   * Format memory stats for Cursor inline display.
-   */
-  formatStats(stats: {
-    totalFiles: number;
-    totalSizeBytes: number;
-    oldestDate?: string;
-    newestDate?: string;
-    curatedMemorySize: number;
-  }): string {
-    return [
-      "## Memory Statistics",
-      "",
-      `| Metric | Value |`,
-      `|--------|-------|`,
-      `| Daily log files | ${stats.totalFiles} |`,
-      `| Total size | ${(stats.totalSizeBytes / 1024).toFixed(1)} KB |`,
-      `| Date range | ${stats.oldestDate ?? "none"} — ${stats.newestDate ?? "none"} |`,
-      `| MEMORY.md | ${(stats.curatedMemorySize / 1024).toFixed(1)} KB |`,
-    ].join("\n");
-  }
-
-  /**
-   * Format an inline memory reference (wikilink style) for Cursor.
-   * Renders as a clickable file link if the vault is open in Cursor.
-   */
-  formatMemoryLink(file: MemoryFile): string {
-    return `[${file.name}](${file.path})`;
-  }
-
-  /**
-   * Build a Cursor annotation for memory-related events.
-   */
-  buildAnnotation(
-    message: string,
-    severity: CursorAnnotation["severity"] = "info",
-    file?: string,
-    line?: number,
-  ): CursorAnnotation {
-    return { message, severity, file, line };
+  getSessionLength(): number {
+    return this.sessionMessages.length;
   }
 }
 
@@ -251,10 +319,11 @@ export class CursorMemoryAdapter {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function truncateForCursor(text: string, limit: number): string {
-  if (text.length <= limit) return text;
-  const truncated = text.slice(0, limit - 50);
-  const lastNewline = truncated.lastIndexOf("\n");
-  const breakAt = lastNewline > limit * 0.7 ? lastNewline : limit - 50;
-  return text.slice(0, breakAt) + "\n\n*... content truncated ...*";
+function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("error", reject);
+  });
 }

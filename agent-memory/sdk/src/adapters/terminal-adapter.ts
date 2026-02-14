@@ -1,17 +1,29 @@
 /**
- * Terminal Memory Channel Adapter
+ * Terminal Communication Channel Adapter
  *
- * Bridges the agent memory system to the desktop terminal (TTY).
- * Formats memory search results, bootstrap context, and session summaries
- * using ANSI escape codes for rich terminal output with color and structure.
+ * Lets you converse with the memory agent from your desktop terminal.
+ * Provides an interactive REPL that reads from stdin, routes messages
+ * through the MemoryAgent, and prints responses to stdout with optional
+ * ANSI color formatting.
  *
- * Supports both color and plain-text modes for piping / CI environments.
+ * Usage:
+ *   const channel = new TerminalChannelAdapter({
+ *     memoryConfig: { vaultPath: "./vault", anthropicApiKey: "..." },
+ *   });
+ *   await channel.start();
+ *
+ * Or for single-shot (pipe-friendly) mode:
+ *   const reply = await channel.send("What did we discuss yesterday?");
+ *   console.log(reply);
  */
 
-import type { MemoryFile, SearchResult, BootstrapFile } from "../types.js";
+import { EventEmitter } from "node:events";
+import * as readline from "node:readline";
+import type { MemoryConfig, SessionMessage } from "../types.js";
+import { MemoryAgent } from "../agent.js";
 
 // ---------------------------------------------------------------------------
-// ANSI escape codes
+// ANSI helpers
 // ---------------------------------------------------------------------------
 
 const ANSI = {
@@ -19,316 +31,374 @@ const ANSI = {
   bold: "\x1b[1m",
   dim: "\x1b[2m",
   italic: "\x1b[3m",
-  underline: "\x1b[4m",
-
-  // Foreground
-  black: "\x1b[30m",
-  red: "\x1b[31m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  blue: "\x1b[34m",
-  magenta: "\x1b[35m",
   cyan: "\x1b[36m",
-  white: "\x1b[37m",
-
-  // Bright foreground
+  green: "\x1b[32m",
+  magenta: "\x1b[35m",
+  yellow: "\x1b[33m",
+  red: "\x1b[31m",
   brightBlack: "\x1b[90m",
-  brightGreen: "\x1b[92m",
-  brightYellow: "\x1b[93m",
-  brightBlue: "\x1b[94m",
-  brightMagenta: "\x1b[95m",
-  brightCyan: "\x1b[96m",
-} as const;
-
-// Box-drawing characters
-const BOX = {
-  topLeft: "┌",
-  topRight: "┐",
-  bottomLeft: "└",
-  bottomRight: "┘",
-  horizontal: "─",
-  vertical: "│",
-  teeRight: "├",
-  teeLeft: "┤",
-  bullet: "●",
-  dot: "·",
-  arrow: "→",
 } as const;
 
 // ---------------------------------------------------------------------------
-// Constants
+// Types
 // ---------------------------------------------------------------------------
 
-const TERMINAL_WIDTH = 80;
-const TERMINAL_TEXT_LIMIT = 10000;
+export interface TerminalChannelConfig {
+  /** Memory system configuration */
+  memoryConfig: MemoryConfig;
+  /** Enable ANSI colors (default: auto-detect TTY) */
+  color?: boolean;
+  /** Custom prompt string (default: "you > ") */
+  prompt?: string;
+  /** Bot name displayed in responses (default: "agent") */
+  botName?: string;
+  /** Print a welcome banner on start (default: true) */
+  showBanner?: boolean;
+  /** Session identifier (default: auto-generated) */
+  sessionId?: string;
+  /** Input stream (default: process.stdin) */
+  input?: NodeJS.ReadableStream;
+  /** Output stream (default: process.stdout) */
+  output?: NodeJS.WritableStream;
+}
 
 // ---------------------------------------------------------------------------
-// Terminal Memory Channel Adapter
+// Terminal Communication Channel
 // ---------------------------------------------------------------------------
 
-export class TerminalMemoryAdapter {
+export class TerminalChannelAdapter extends EventEmitter {
   readonly channelId = "terminal" as const;
-  readonly supportsEmbeds = false;
-  readonly supportsBlocks = false;
-  readonly supportsThreads = false;
-  readonly textChunkLimit = TERMINAL_TEXT_LIMIT;
 
+  private config: TerminalChannelConfig;
+  private agent: MemoryAgent;
+  private sessionMessages: SessionMessage[] = [];
+  private rl: readline.Interface | null = null;
+  private sessionId: string;
+  private running = false;
   private useColor: boolean;
 
-  constructor(options?: { color?: boolean }) {
-    this.useColor = options?.color ?? detectColorSupport();
-  }
+  private input: NodeJS.ReadableStream;
+  private output: NodeJS.WritableStream;
 
-  /**
-   * Build cross-context embed for terminal (simple bracketed label).
-   */
-  buildCrossContextEmbeds(originLabel: string): string[] {
-    if (this.useColor) {
-      return [`${ANSI.dim}${ANSI.magenta}[Memory: ${originLabel}]${ANSI.reset}`];
-    }
-    return [`[Memory: ${originLabel}]`];
-  }
-
-  /**
-   * Format a memory search result for terminal display.
-   */
-  formatSearchResult(result: SearchResult, index: number): string {
-    const { file, score, excerpts } = result;
-    const lines: string[] = [];
-    const c = this.useColor;
-
-    // Header
-    const num = `${index + 1}.`;
-    const name = c ? `${ANSI.bold}${ANSI.cyan}${file.name}${ANSI.reset}` : file.name;
-    const scoreStr = c
-      ? `${ANSI.dim}(score: ${score.toFixed(2)})${ANSI.reset}`
-      : `(score: ${score.toFixed(2)})`;
-    lines.push(`  ${num} ${name} ${scoreStr}`);
-
-    // Metadata
-    const meta: string[] = [];
-    if (file.meta.date) {
-      meta.push(c ? `${ANSI.brightBlack}Date: ${file.meta.date}${ANSI.reset}` : `Date: ${file.meta.date}`);
-    }
-    if (file.meta.tags?.length) {
-      const tags = file.meta.tags.join(", ");
-      meta.push(c ? `${ANSI.brightBlack}Tags: ${tags}${ANSI.reset}` : `Tags: ${tags}`);
-    }
-    if (file.meta.source) {
-      meta.push(c ? `${ANSI.brightBlack}Source: ${file.meta.source}${ANSI.reset}` : `Source: ${file.meta.source}`);
-    }
-    if (meta.length > 0) {
-      lines.push(`     ${meta.join("  ${BOX.dot}  ")}`);
-    }
-
-    // Excerpts (indented with bar)
-    for (const excerpt of excerpts.slice(0, 3)) {
-      lines.push("");
-      const bar = c ? `${ANSI.dim}${BOX.vertical}${ANSI.reset}` : BOX.vertical;
-      for (const line of excerpt.split("\n")) {
-        lines.push(`     ${bar} ${line}`);
-      }
-    }
-
-    return lines.join("\n");
-  }
-
-  /**
-   * Format multiple search results for terminal.
-   */
-  formatSearchResults(results: SearchResult[]): string {
-    if (results.length === 0) {
-      return this.useColor
-        ? `  ${ANSI.dim}No memory entries found matching your query.${ANSI.reset}`
-        : "  No memory entries found matching your query.";
-    }
-
-    const c = this.useColor;
-    const lines: string[] = [];
-
-    // Header box
-    const title = `Memory Search Results (${results.length})`;
-    lines.push(this.drawBoxHeader(title));
-    lines.push("");
-
-    for (let i = 0; i < results.length; i++) {
-      lines.push(this.formatSearchResult(results[i], i));
-      if (i < results.length - 1) {
-        const sep = c
-          ? `  ${ANSI.dim}${BOX.horizontal.repeat(40)}${ANSI.reset}`
-          : `  ${BOX.horizontal.repeat(40)}`;
-        lines.push("");
-        lines.push(sep);
-        lines.push("");
-      }
-    }
-
-    lines.push("");
-    lines.push(this.drawBoxFooter());
-
-    return lines.join("\n");
-  }
-
-  /**
-   * Format a memory file for terminal display.
-   */
-  formatMemoryFile(file: MemoryFile): string {
-    const c = this.useColor;
-    const lines: string[] = [];
-
-    // Title
-    const title = c ? `${ANSI.bold}${ANSI.cyan}${file.name}${ANSI.reset}` : file.name;
-    lines.push(this.drawBoxHeader(file.name));
-    lines.push("");
-
-    // Metadata
-    if (file.meta.date) {
-      lines.push(formatField("Date", file.meta.date, c));
-    }
-    if (file.meta.type) {
-      lines.push(formatField("Type", file.meta.type, c));
-    }
-    if (file.meta.tags?.length) {
-      lines.push(formatField("Tags", file.meta.tags.join(", "), c));
-    }
-    if (file.meta.date || file.meta.type || file.meta.tags?.length) {
-      lines.push("");
-    }
-
-    // Content
-    const content = truncateTerminal(file.content, TERMINAL_TEXT_LIMIT);
-    lines.push(content);
-    lines.push("");
-    lines.push(this.drawBoxFooter());
-
-    return lines.join("\n");
-  }
-
-  /**
-   * Format bootstrap context for terminal (session start).
-   */
-  formatBootstrapContext(files: BootstrapFile[]): string {
-    const loaded = files.filter((f) => f.exists);
-    const c = this.useColor;
-
-    if (loaded.length === 0) {
-      return c
-        ? `  ${ANSI.dim}No bootstrap files loaded.${ANSI.reset}`
-        : "  No bootstrap files loaded.";
-    }
-
-    const lines: string[] = [];
-    const label = c
-      ? `${ANSI.dim}Loaded ${loaded.length} bootstrap file(s):${ANSI.reset}`
-      : `Loaded ${loaded.length} bootstrap file(s):`;
-    lines.push(`  ${label}`);
-
-    for (const file of loaded) {
-      const name = c ? `${ANSI.cyan}${file.name}${ANSI.reset}` : file.name;
-      const bullet = c ? `${ANSI.dim}${BOX.bullet}${ANSI.reset}` : BOX.bullet;
-      lines.push(`    ${bullet} ${name}`);
-    }
-
-    return lines.join("\n");
-  }
-
-  /**
-   * Format a session save confirmation for terminal.
-   */
-  formatSessionSave(filePath: string, slug: string): string {
-    const c = this.useColor;
-    const label = c
-      ? `${ANSI.green}${ANSI.bold}Session saved${ANSI.reset}`
-      : "Session saved";
-    const path = c ? `${ANSI.dim}${filePath}${ANSI.reset}` : filePath;
-    const topic = c ? `${ANSI.italic}${slug}${ANSI.reset}` : slug;
-    return `  ${label} ${BOX.arrow} ${path}\n  Topic: ${topic}`;
-  }
-
-  /**
-   * Format a memory flush notification for terminal.
-   */
-  formatMemoryFlush(filePath: string): string {
-    const c = this.useColor;
-    const label = c
-      ? `${ANSI.magenta}${ANSI.bold}Memory flushed${ANSI.reset}`
-      : "Memory flushed";
-    const path = c ? `${ANSI.dim}${filePath}${ANSI.reset}` : filePath;
-    return `  ${label} before context compaction ${BOX.arrow} ${path}`;
-  }
-
-  /**
-   * Format memory stats for terminal.
-   */
-  formatStats(stats: {
-    totalFiles: number;
-    totalSizeBytes: number;
-    oldestDate?: string;
-    newestDate?: string;
-    curatedMemorySize: number;
-  }): string {
-    const c = this.useColor;
-    const lines: string[] = [];
-
-    lines.push(this.drawBoxHeader("Memory Statistics"));
-    lines.push("");
-    lines.push(formatField("Daily logs", String(stats.totalFiles), c));
-    lines.push(formatField("Total size", `${(stats.totalSizeBytes / 1024).toFixed(1)} KB`, c));
-    lines.push(
-      formatField(
-        "Date range",
-        `${stats.oldestDate ?? "none"} ${BOX.arrow} ${stats.newestDate ?? "none"}`,
-        c,
-      ),
-    );
-    lines.push(formatField("MEMORY.md", `${(stats.curatedMemorySize / 1024).toFixed(1)} KB`, c));
-    lines.push("");
-    lines.push(this.drawBoxFooter());
-
-    return lines.join("\n");
+  constructor(config: TerminalChannelConfig) {
+    super();
+    this.config = config;
+    this.agent = new MemoryAgent(config.memoryConfig);
+    this.sessionId = config.sessionId ?? `terminal-${Date.now()}`;
+    this.useColor = config.color ?? detectColorSupport();
+    this.input = config.input ?? process.stdin;
+    this.output = config.output ?? process.stdout;
   }
 
   // -------------------------------------------------------------------------
-  // Box drawing helpers
+  // Interactive REPL mode
   // -------------------------------------------------------------------------
 
-  private drawBoxHeader(title: string): string {
-    const c = this.useColor;
-    const padded = ` ${title} `;
-    const lineLen = Math.max(TERMINAL_WIDTH - 4, padded.length + 4);
-    const remaining = lineLen - padded.length - 2;
-    const left = BOX.topLeft + BOX.horizontal.repeat(2);
-    const right = BOX.horizontal.repeat(Math.max(0, remaining)) + BOX.topRight;
+  /**
+   * Start the interactive terminal REPL.
+   * Reads lines from stdin, sends them through the memory agent,
+   * and prints responses to stdout.
+   *
+   * Built-in commands:
+   *   /quit, /exit  — end session and save to memory
+   *   /search <q>   — search memory directly
+   *   /stats        — show memory statistics
+   *   /save <text>  — write an entry to today's daily log
+   *   /flush        — flush session to memory without exiting
+   *   /help         — show available commands
+   */
+  async start(): Promise<void> {
+    if (this.running) return;
+    this.running = true;
 
-    if (c) {
-      return `  ${ANSI.dim}${left}${ANSI.reset}${ANSI.bold} ${title} ${ANSI.reset}${ANSI.dim}${right}${ANSI.reset}`;
+    if (this.config.showBanner !== false) {
+      this.printBanner();
     }
-    return `  ${left}${padded}${right}`;
+
+    this.rl = readline.createInterface({
+      input: this.input,
+      output: this.output,
+      prompt: this.getPrompt(),
+      terminal: this.input === process.stdin,
+    });
+
+    this.rl.prompt();
+
+    for await (const line of this.rl) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        this.rl.prompt();
+        continue;
+      }
+
+      // Handle built-in commands
+      if (trimmed.startsWith("/")) {
+        const shouldContinue = await this.handleCommand(trimmed);
+        if (!shouldContinue) break;
+        this.rl.prompt();
+        continue;
+      }
+
+      // Process through memory agent
+      await this.handleUserInput(trimmed);
+      this.rl.prompt();
+    }
+
+    // Session ended (EOF or /quit)
+    await this.stop();
   }
 
-  private drawBoxFooter(): string {
-    const c = this.useColor;
-    const lineLen = Math.max(TERMINAL_WIDTH - 4, 20);
-    const line = BOX.bottomLeft + BOX.horizontal.repeat(lineLen) + BOX.bottomRight;
-    return c ? `  ${ANSI.dim}${line}${ANSI.reset}` : `  ${line}`;
+  /**
+   * Stop the REPL and save the session.
+   */
+  async stop(): Promise<void> {
+    if (!this.running) return;
+
+    if (this.sessionMessages.length > 0) {
+      this.write(this.fmt("\nSaving session to memory...", "dim"));
+      await this.agent.saveSession(this.sessionId, "terminal", this.sessionMessages);
+      this.write(this.fmt("Session saved.\n", "green"));
+      this.sessionMessages = [];
+    }
+
+    if (this.rl) {
+      this.rl.close();
+      this.rl = null;
+    }
+
+    this.running = false;
+    this.emit("disconnected");
+  }
+
+  // -------------------------------------------------------------------------
+  // Direct (non-interactive) mode
+  // -------------------------------------------------------------------------
+
+  /**
+   * Send a single message and get a response (no REPL).
+   * Useful for piping or scripting: `echo "question" | node agent.js`
+   */
+  async send(message: string): Promise<string> {
+    if (!message.trim()) return "";
+
+    this.sessionMessages.push({
+      role: "user",
+      content: message,
+      timestamp: new Date(),
+    });
+
+    const response = await this.agent.run(message);
+
+    this.sessionMessages.push({
+      role: "assistant",
+      content: response,
+      timestamp: new Date(),
+    });
+
+    this.emit("message_processed", {
+      sessionId: this.sessionId,
+      responseLength: response.length,
+    });
+
+    return response;
+  }
+
+  /**
+   * Whether the REPL is currently running.
+   */
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  // -------------------------------------------------------------------------
+  // REPL internals
+  // -------------------------------------------------------------------------
+
+  private async handleUserInput(text: string): Promise<void> {
+    this.sessionMessages.push({
+      role: "user",
+      content: text,
+      timestamp: new Date(),
+    });
+
+    this.write(this.fmt("  thinking...", "dim"));
+
+    try {
+      const response = await this.agent.run(text);
+
+      this.sessionMessages.push({
+        role: "assistant",
+        content: response,
+        timestamp: new Date(),
+      });
+
+      // Clear "thinking..." and print response
+      this.clearLine();
+      const label = this.fmt(
+        `${this.config.botName ?? "agent"} > `,
+        "cyan",
+        true,
+      );
+      this.write(`${label}${response}\n\n`);
+
+      this.emit("message_processed", {
+        sessionId: this.sessionId,
+        responseLength: response.length,
+      });
+    } catch (err) {
+      this.clearLine();
+      this.write(this.fmt(`Error: ${err instanceof Error ? err.message : String(err)}\n`, "red"));
+      this.emit("error", err);
+    }
+  }
+
+  private async handleCommand(input: string): Promise<boolean> {
+    const parts = input.split(/\s+/);
+    const cmd = parts[0].toLowerCase();
+    const args = parts.slice(1).join(" ");
+
+    switch (cmd) {
+      case "/quit":
+      case "/exit":
+        return false;
+
+      case "/search": {
+        if (!args) {
+          this.write(this.fmt("Usage: /search <query>\n", "yellow"));
+          return true;
+        }
+        this.write(this.fmt("  searching...", "dim"));
+        const result = await this.agent.handleToolCall("memory_search", {
+          query: args,
+          max_results: 6,
+        });
+        this.clearLine();
+        this.write(`${result}\n\n`);
+        return true;
+      }
+
+      case "/stats": {
+        const stats = await this.agent.handleToolCall("memory_stats", {});
+        this.write(`${stats}\n\n`);
+        return true;
+      }
+
+      case "/save": {
+        if (!args) {
+          this.write(this.fmt("Usage: /save <content to save>\n", "yellow"));
+          return true;
+        }
+        const result = await this.agent.handleToolCall("memory_write", {
+          content: args,
+        });
+        this.write(this.fmt(`${result}\n\n`, "green"));
+        return true;
+      }
+
+      case "/flush": {
+        if (this.sessionMessages.length === 0) {
+          this.write(this.fmt("No messages to flush.\n", "dim"));
+          return true;
+        }
+        this.write(this.fmt("  flushing...", "dim"));
+        const path = await this.agent.flushMemory(this.sessionMessages);
+        this.clearLine();
+        this.write(this.fmt(`Flushed to: ${path}\n\n`, "green"));
+        return true;
+      }
+
+      case "/help":
+        this.printHelp();
+        return true;
+
+      default:
+        this.write(this.fmt(`Unknown command: ${cmd}. Type /help for options.\n`, "yellow"));
+        return true;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Output helpers
+  // -------------------------------------------------------------------------
+
+  private write(text: string): void {
+    this.output.write(text);
+  }
+
+  private clearLine(): void {
+    if (this.useColor && this.output === process.stdout) {
+      process.stdout.clearLine(0);
+      process.stdout.cursorTo(0);
+    }
+  }
+
+  private fmt(text: string, style: keyof typeof ANSI, bold = false): string {
+    if (!this.useColor) return text;
+    const prefix = bold ? `${ANSI[style]}${ANSI.bold}` : ANSI[style];
+    return `${prefix}${text}${ANSI.reset}`;
+  }
+
+  private getPrompt(): string {
+    const base = this.config.prompt ?? "you > ";
+    if (!this.useColor) return base;
+    return `${ANSI.green}${ANSI.bold}${base}${ANSI.reset}`;
+  }
+
+  private printBanner(): void {
+    const line = "─".repeat(50);
+    const banner = [
+      "",
+      this.fmt(line, "dim"),
+      this.fmt("  Agent Memory — Terminal Channel", "cyan", true),
+      this.fmt(`  Session: ${this.sessionId}`, "dim"),
+      this.fmt(`  Vault: ${this.config.memoryConfig.vaultPath}`, "dim"),
+      this.fmt("  Type /help for commands, /quit to exit", "dim"),
+      this.fmt(line, "dim"),
+      "",
+    ].join("\n");
+    this.write(banner);
+  }
+
+  private printHelp(): void {
+    const help = [
+      "",
+      this.fmt("Available commands:", "cyan", true),
+      `  ${this.fmt("/search <query>", "yellow")}  — Search memory for a topic`,
+      `  ${this.fmt("/save <text>", "yellow")}     — Save a note to today's daily log`,
+      `  ${this.fmt("/stats", "yellow")}            — Show memory system statistics`,
+      `  ${this.fmt("/flush", "yellow")}            — Flush session to memory now`,
+      `  ${this.fmt("/help", "yellow")}             — Show this help message`,
+      `  ${this.fmt("/quit", "yellow")}             — Save session and exit`,
+      "",
+      this.fmt("  Or just type a message to chat with the agent.", "dim"),
+      "",
+    ].join("\n");
+    this.write(help);
+  }
+
+  // -------------------------------------------------------------------------
+  // Session management
+  // -------------------------------------------------------------------------
+
+  /**
+   * Manually flush the current session to memory (without stopping).
+   */
+  async flushSession(): Promise<string | null> {
+    if (this.sessionMessages.length === 0) return null;
+    return this.agent.flushMemory(this.sessionMessages);
+  }
+
+  /**
+   * Get the current session message count.
+   */
+  getSessionLength(): number {
+    return this.sessionMessages.length;
   }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function formatField(label: string, value: string, useColor: boolean): string {
-  if (useColor) {
-    return `    ${ANSI.bold}${label}:${ANSI.reset} ${value}`;
-  }
-  return `    ${label}: ${value}`;
-}
-
-function truncateTerminal(text: string, limit: number): string {
-  if (text.length <= limit) return text;
-  return text.slice(0, limit - 30) + "\n  ... (truncated)";
-}
 
 function detectColorSupport(): boolean {
   if (typeof process === "undefined") return false;
