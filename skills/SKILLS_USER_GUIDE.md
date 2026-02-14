@@ -1,6 +1,8 @@
 # OpenClaw Skills User Guide
 
-Your OpenClaw instance has 65 skills organized into functional layers. This guide covers the 12 memory and intelligence skills that form the "nervous system" — the layer that makes all 65 skills work together as a cohesive system.
+Your OpenClaw instance has 71 skills. This guide covers the 20 intelligence and system skills that form the brain and nervous system — the layer that makes all skills work together as a cohesive system.
+
+**New to OpenClaw?** Just say "what can you do?" — the **Skills Manager** will help you find the right skill for anything.
 
 ## Quick Start
 
@@ -25,7 +27,7 @@ OpenClaw runs your end-of-day playbook:
 
 ---
 
-## The 12 Intelligence Skills
+## The 20 Intelligence & System Skills
 
 ### Layer 1: Memory & Context (the foundation)
 
@@ -117,6 +119,60 @@ These 4 skills connect everything together.
 
 ---
 
+### Layer 4: System & Operations (the toolkit)
+
+These 8 skills manage, protect, and optimize the system itself.
+
+#### Skills Manager `🗂️`
+**What**: Command center for all 71 skills — find, understand, and invoke any skill.
+**Trigger**: "What can you do?", "help me find a skill", "how do I use X?", "list skills"
+**How it works**: Matches your intent to the right skill via keyword, category, or outcome matching. If multiple skills are needed, suggests a chain.
+**Key feature**: Natural language lookup — just describe what you want, no need to know skill names.
+
+#### Backup & Export `💾`
+**What**: Back up memory, sessions, config, and knowledge.
+**Trigger**: "Back up my data", "export everything", "disaster recovery"
+**Modes**: Full (everything), Memory (just memory files), Sessions (session JSONL), Selective (pick categories)
+**Scheduling**: `openclaw cron add --name "backup:daily-memory" --schedule "0 2 * * *"` for nightly backups
+
+#### Analytics Dashboard `📈`
+**What**: Usage reports — costs, channel distribution, skill usage, productivity.
+**Trigger**: "Show analytics", "usage report", "how much am I spending?", "which channels do I use?"
+**Reports**: Quick Summary, Cost, Channel Activity, Skill Usage, Productivity
+**Visualization**: Text-based spark charts and bar charts that work across all channels
+
+#### Data Import `📥`
+**What**: Import external data into OpenClaw's memory system.
+**Trigger**: "Import my contacts", "migrate from Notion", "load this CSV"
+**Formats**: CSV, vCard, JSON, Markdown, HTML, ENEX (Evernote), plain text
+**Safety**: Always shows preview before writing. Never overwrites existing data.
+
+#### Voice Assistant `🎙️`
+**What**: Unified voice interface combining STT, TTS, and voice calls.
+**Trigger**: "Voice mode", "talk to me", "read this aloud", "hands-free"
+**Modes**: Listen (speech→text), Conversation (speech→text→speech), Read (text→speech), Call (phone integration)
+**Components**: openai-whisper (local STT), openai-whisper-api (cloud STT), sherpa-onnx-tts (TTS), voice-call (phone)
+
+#### Skill Health `🩺`
+**What**: Diagnose skill integrity, dependencies, and conflicts.
+**Trigger**: "Check my skills", "any broken skills?", "why isn't X working?"
+**Checks**: Structure validation, binary dependency check, script syntax, duplicate detection, reference integrity, staleness
+**Quick fix**: `--fix` flag auto-repairs permissions and empty directories
+
+#### Natural Language Config `⚙️`
+**What**: Edit OpenClaw settings in plain English.
+**Trigger**: "Turn off notifications after 10pm", "use a cheaper model for WhatsApp", "add Sarah to allowlist"
+**Safety**: Always shows diff before applying. Creates backup. Supports undo.
+**Key feature**: Ambiguity resolution — asks clarifying questions when a request has multiple interpretations.
+
+#### Skill Testing `🧪`
+**What**: Test and validate skills beyond structure checks.
+**Trigger**: "Test this skill", "validate all skills", "dry run"
+**Levels**: Structure (frontmatter), Content (quality signals), Dry Run (simulate execution), Integration (multi-skill chains)
+**Scheduling**: `openclaw cron add --name "skill-testing:weekly" --schedule "0 11 * * 1"` for weekly checks
+
+---
+
 ## Memory Architecture
 
 All intelligence skills share a common data layer:
@@ -126,6 +182,7 @@ memory/
 ├── YYYY-MM-DD.md          # Daily logs (decisions, notes, follow-ups)
 ├── MEMORY.md              # Curated long-term memory
 ├── goals.md               # Active and completed goals
+├── config-changes.md      # Config change audit trail (nlp-config)
 ├── people/                # Person files (relationship CRM)
 │   ├── sarah-chen.md
 │   └── john-smith.md
@@ -141,6 +198,7 @@ memory/
 
 Session logs live at `~/.openclaw/agents/<agentId>/sessions/` as JSONL files.
 Cost data comes from CodexBar (`codexbar cost --format json`).
+Backups go to `~/openclaw-backups/` (configurable).
 
 ---
 
@@ -176,6 +234,21 @@ knowledge-distiller → scans week's sessions → extracts facts, patterns, conc
                     → creates/updates knowledge files
 ```
 
+### "Back up everything before I migrate"
+```
+backup-export → full mode → timestamped tar.gz with all memory, sessions, config
+```
+
+### "How am I using this system?"
+```
+analytics-dashboard → cost breakdown + channel distribution + skill usage + productivity metrics
+```
+
+### "Import my contacts from Google"
+```
+data-import → parse vCard → preview → create memory/people/ files → available in relationship-crm
+```
+
 ---
 
 ## Scheduling Automations
@@ -185,9 +258,19 @@ knowledge-distiller → scans week's sessions → extracts facts, patterns, conc
 openclaw cron add --name "playbook:morning-routine" --schedule "0 8 * * 1-5" --prompt "Run playbook: morning-routine"
 ```
 
-### Set up the weekly review
+### Set up nightly backup
 ```bash
-openclaw cron add --name "playbook:weekly-review" --schedule "0 9 * * 1" --prompt "Run playbook: weekly-review"
+openclaw cron add --name "backup:daily-memory" --schedule "0 2 * * *" --prompt "Run backup-export in memory mode"
+```
+
+### Set up weekly analytics
+```bash
+openclaw cron add --name "analytics:weekly-report" --schedule "0 9 * * 1" --prompt "Run analytics-dashboard full weekly report"
+```
+
+### Set up weekly skill health check
+```bash
+openclaw cron add --name "skill-health:weekly" --schedule "0 10 * * 1" --prompt "Run skill-health full check, report issues only"
 ```
 
 ### Check what's scheduled
@@ -214,16 +297,22 @@ Output adapts to the channel:
 
 ## Tips
 
-1. **Start with goals**: Define 2-3 goals early. This makes daily-briefing, weekly-insights, and predictive-assistant dramatically more useful.
+1. **Start with "what can you do?"**: The Skills Manager is your entry point. Describe what you want — it'll find the right skill.
 
-2. **Let decisions accumulate**: The system gets smarter as you record more decisions. After 10+ ADRs, proactive-recall and project-handoff become powerful.
+2. **Start with goals**: Define 2-3 goals early. This makes daily-briefing, weekly-insights, and predictive-assistant dramatically more useful.
 
-3. **Use "wrap up" daily**: The end-of-day playbook captures decisions and knowledge that would otherwise be lost when the session closes.
+3. **Let decisions accumulate**: The system gets smarter as you record more decisions. After 10+ ADRs, proactive-recall and project-handoff become powerful.
 
-4. **Trust the throttling**: Predictive-assistant limits itself to 2 nudges per session. If it feels too quiet, that means there's nothing urgent.
+4. **Use "wrap up" daily**: The end-of-day playbook captures decisions and knowledge that would otherwise be lost when the session closes.
 
-5. **Cross-channel continuity improves over time**: The more channels you use, the more context threads can carry. Start conversations wherever it's natural.
+5. **Trust the throttling**: Predictive-assistant limits itself to 2 nudges per session. If it feels too quiet, that means there's nothing urgent.
 
-6. **Review knowledge weekly**: Run "organize knowledge" periodically to merge, update, and clean the knowledge base.
+6. **Back up regularly**: Set up the daily memory backup cron. Your memory files are irreplaceable.
 
-7. **Playbooks are composable**: Start with the built-in playbooks, then customize or create your own as you discover your patterns.
+7. **Cross-channel continuity improves over time**: The more channels you use, the more context threads can carry. Start conversations wherever it's natural.
+
+8. **Review analytics weekly**: The analytics dashboard shows if you're getting value. Cost trends, channel usage, and productivity signals help you optimize.
+
+9. **Import your existing data**: Use data-import to bring in contacts, notes, and bookmarks from other systems. This bootstraps the intelligence layer.
+
+10. **Playbooks are composable**: Start with the built-in playbooks, then customize or create your own as you discover your patterns.
