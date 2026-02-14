@@ -1,0 +1,25 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "command": "",
+        "description": "Memory files are plain markdown — no post-processing needed"
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "",
+        "command": "cat $AGENT_VAULT_PATH/MEMORY.md 2>/dev/null; echo '---'; ls -t $AGENT_VAULT_PATH/memory/*.md 2>/dev/null | head -5 | while read f; do echo \"=== $(basename $f) ===\"; head -30 \"$f\"; echo; done",
+        "description": "Load curated memory + recent daily logs at session start"
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "command": "AGENT_VAULT_PATH=${AGENT_VAULT_PATH:-./agent-memory/vault} ./agent-memory/hooks/session-save.sh",
+        "description": "Save session context to daily memory log on session end"
+      }
+    ]
+  }
+}

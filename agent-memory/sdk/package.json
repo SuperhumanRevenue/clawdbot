@@ -1,0 +1,29 @@
+{
+  "name": "agent-memory-sdk",
+  "version": "1.0.0",
+  "description": "Claude Agent SDK memory system — Obsidian-native, file-backed agent memory",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "search": "node dist/index.js search",
+    "flush": "node dist/index.js flush",
+    "save": "node dist/index.js save",
+    "init": "node dist/index.js init"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "gray-matter": "^4.0.3",
+    "glob": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
