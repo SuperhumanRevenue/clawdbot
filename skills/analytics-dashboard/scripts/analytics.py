@@ -280,6 +280,17 @@ def parse_session_file(
     if messages == 0 and total_cost == 0:
         return None
 
+    # Compute session duration in minutes
+    duration_mins = 0.0
+    if first_ts and last_ts and last_ts > first_ts:
+        duration_mins = (last_ts - first_ts).total_seconds() / 60.0
+
+    # Autonomy ratio: how many tool calls per user message
+    # Higher = more autonomous work per human request
+    autonomy_ratio = (
+        sum(tool_calls.values()) / max(user_messages, 1)
+    )
+
     return {
         "session_id": path.stem,
         "path": str(path),
@@ -295,6 +306,8 @@ def parse_session_file(
         "first_ts": first_ts.isoformat() if first_ts else None,
         "last_ts": last_ts.isoformat() if last_ts else None,
         "date": first_ts.strftime("%Y-%m-%d") if first_ts else None,
+        "duration_mins": round(duration_mins, 1),
+        "autonomy_ratio": round(autonomy_ratio, 1),
         # Outcomes
         "files_modified": len(files_modified),
         "files_created": len(files_created),
@@ -431,6 +444,215 @@ def count_memory_outcomes(
             )
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Cron / automated work tracking
+# ---------------------------------------------------------------------------
+
+
+def load_cron_runs(
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Load cron job execution history from run logs.
+
+    Reads ~/.openclaw/cron/runs/*.jsonl and jobs.json to measure
+    automated work that happened without user interaction.
+    """
+    cron_dir = Path.home() / ".openclaw" / "cron"
+    results: Dict[str, Any] = {
+        "jobs_active": 0,
+        "total_runs": 0,
+        "successful_runs": 0,
+        "failed_runs": 0,
+        "skipped_runs": 0,
+        "total_duration_ms": 0,
+        "runs_by_job": {},
+        "job_names": {},
+    }
+
+    # Load job definitions for names and active count
+    jobs_file = cron_dir / "jobs.json"
+    if jobs_file.is_file():
+        try:
+            with open(jobs_file, encoding="utf-8") as fh:
+                jobs_data = json.load(fh)
+            if isinstance(jobs_data, dict):
+                for job_id, job_def in jobs_data.items():
+                    if isinstance(job_def, dict):
+                        if job_def.get("enabled", True):
+                            results["jobs_active"] += 1
+                        name = job_def.get("name", job_id)
+                        results["job_names"][job_id] = name
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Load run history
+    runs_dir = cron_dir / "runs"
+    if not runs_dir.is_dir():
+        return results
+
+    job_runs: Dict[str, int] = defaultdict(int)
+    job_successes: Dict[str, int] = defaultdict(int)
+
+    for jsonl_file in sorted(runs_dir.glob("*.jsonl")):
+        try:
+            with open(jsonl_file, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Filter by date range
+                    ts_val = entry.get("ts") or entry.get("runAtMs")
+                    if ts_val:
+                        if isinstance(ts_val, (int, float)):
+                            ts = datetime.fromtimestamp(ts_val / 1000.0)
+                        elif isinstance(ts_val, str):
+                            try:
+                                ts = datetime.fromisoformat(
+                                    ts_val.replace("Z", "+00:00")
+                                ).replace(tzinfo=None)
+                            except (ValueError, TypeError):
+                                ts = None
+                        else:
+                            ts = None
+
+                        if ts:
+                            if since and ts < since:
+                                continue
+                            if until and ts > until:
+                                continue
+
+                    job_id = entry.get("jobId", jsonl_file.stem)
+                    status = entry.get("status", "unknown")
+                    duration = entry.get("durationMs", 0)
+
+                    results["total_runs"] += 1
+                    job_runs[job_id] += 1
+
+                    if status == "ok":
+                        results["successful_runs"] += 1
+                        job_successes[job_id] += 1
+                    elif status == "error":
+                        results["failed_runs"] += 1
+                    elif status == "skipped":
+                        results["skipped_runs"] += 1
+
+                    if isinstance(duration, (int, float)):
+                        results["total_duration_ms"] += int(duration)
+
+        except OSError:
+            continue
+
+    results["runs_by_job"] = dict(job_runs)
+    results["successes_by_job"] = dict(job_successes)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Agent leverage computation
+# ---------------------------------------------------------------------------
+
+# Conservative estimates of manual time (minutes) per outcome type.
+# These represent how long a human would typically take to do the
+# equivalent work without agent assistance.
+MANUAL_TIME_ESTIMATES: Dict[str, float] = {
+    "files_touched": 8.0,    # reading, editing, testing a file change
+    "git_commits": 3.0,      # staging, writing message, committing
+    "prs_created": 20.0,     # writing description, setting reviewers, linking issues
+    "tests_run": 4.0,        # running tests, reviewing output, fixing failures
+    "issues_closed": 15.0,   # investigating, fixing, verifying resolution
+}
+
+# Manual time estimates for common cron/automated tasks
+CRON_MANUAL_ESTIMATES: Dict[str, float] = {
+    "daily-briefing": 5.0,
+    "weekly-insights": 15.0,
+    "backup": 3.0,
+    "analytics": 10.0,
+}
+
+
+def compute_leverage(
+    sessions: List[Dict[str, Any]],
+    cron_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Compute agent leverage metrics: time saved, autonomy, throughput.
+
+    Compares agent-assisted work speed against conservative manual
+    estimates to quantify the multiplier effect.
+    """
+    # Session time
+    total_agent_mins = sum(s.get("duration_mins", 0) for s in sessions)
+    sessions_with_duration = sum(
+        1 for s in sessions if s.get("duration_mins", 0) > 0
+    )
+
+    # Aggregate outcomes for manual time estimation
+    outcome_counts: Dict[str, int] = {
+        "files_touched": sum(s.get("files_touched", 0) for s in sessions),
+        "git_commits": sum(s.get("git_commits", 0) for s in sessions),
+        "prs_created": sum(s.get("prs_created", 0) for s in sessions),
+        "tests_run": sum(s.get("tests_run", 0) for s in sessions),
+        "issues_closed": sum(s.get("issues_closed", 0) for s in sessions),
+    }
+
+    estimated_manual_mins = sum(
+        count * MANUAL_TIME_ESTIMATES.get(key, 0)
+        for key, count in outcome_counts.items()
+    )
+
+    # Cron automation time saved
+    cron_runs = cron_data.get("successful_runs", 0)
+    cron_duration_mins = cron_data.get("total_duration_ms", 0) / 60_000.0
+    cron_manual_mins = 0.0
+    job_names = cron_data.get("job_names", {})
+    successes_by_job = cron_data.get("successes_by_job", {})
+    for job_id, run_count in successes_by_job.items():
+        name = job_names.get(job_id, job_id).lower()
+        # Match against known task types
+        matched = False
+        for pattern, mins in CRON_MANUAL_ESTIMATES.items():
+            if pattern in name:
+                cron_manual_mins += run_count * mins
+                matched = True
+                break
+        if not matched:
+            # Default: assume 5 min manual per automated run
+            cron_manual_mins += run_count * 5.0
+
+    # Total time saved
+    total_time_saved = (estimated_manual_mins - total_agent_mins) + (
+        cron_manual_mins - cron_duration_mins
+    )
+
+    # Autonomy: average tool calls per user message across all sessions
+    total_tool_calls = sum(s.get("total_tool_calls", 0) for s in sessions)
+    total_user_msgs = sum(s.get("user_messages", 0) for s in sessions)
+    avg_autonomy = total_tool_calls / max(total_user_msgs, 1)
+
+    # Leverage ratio: estimated manual time / actual agent time
+    actual_total = total_agent_mins + cron_duration_mins
+    estimated_total = estimated_manual_mins + cron_manual_mins
+    leverage_ratio = estimated_total / max(actual_total, 1.0)
+
+    return {
+        "agent_minutes": round(total_agent_mins, 1),
+        "sessions_with_duration": sessions_with_duration,
+        "estimated_manual_minutes": round(estimated_manual_mins, 1),
+        "time_saved_minutes": round(total_time_saved, 1),
+        "leverage_ratio": round(leverage_ratio, 1),
+        "avg_autonomy_ratio": round(avg_autonomy, 1),
+        "cron_runs": cron_runs,
+        "cron_duration_mins": round(cron_duration_mins, 1),
+        "cron_manual_mins": round(cron_manual_mins, 1),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +871,8 @@ def report_productivity(
 def report_outcomes(
     sessions: List[Dict[str, Any]],
     memory_outcomes: Dict[str, Any],
+    cron_data: Dict[str, Any],
+    leverage: Dict[str, Any],
     period_days: int,
     fmt: str,
 ) -> None:
@@ -719,6 +943,23 @@ def report_outcomes(
                 "krs_total": krs_total,
                 "followups_done": followups_done,
                 "followups_pending": followups_pending,
+            },
+            "automation": {
+                "cron_jobs_active": cron_data.get("jobs_active", 0),
+                "cron_runs": cron_data.get("total_runs", 0),
+                "cron_successful": cron_data.get("successful_runs", 0),
+                "cron_failed": cron_data.get("failed_runs", 0),
+                "cron_duration_mins": leverage.get("cron_duration_mins", 0),
+                "cron_manual_mins_saved": leverage.get("cron_manual_mins", 0),
+            },
+            "leverage": {
+                "agent_minutes": leverage.get("agent_minutes", 0),
+                "estimated_manual_minutes": leverage.get(
+                    "estimated_manual_minutes", 0
+                ),
+                "time_saved_minutes": leverage.get("time_saved_minutes", 0),
+                "leverage_ratio": leverage.get("leverage_ratio", 0),
+                "avg_autonomy_ratio": leverage.get("avg_autonomy_ratio", 0),
             },
             "efficiency": {
                 "total_outcomes": total_outcomes,
@@ -791,6 +1032,74 @@ def report_outcomes(
     for label, value in knowledge_rows:
         print(f"    {label:<22} {value}")
 
+    # Automated Work section
+    cron_runs = cron_data.get("total_runs", 0)
+    cron_ok = cron_data.get("successful_runs", 0)
+    cron_fail = cron_data.get("failed_runs", 0)
+    jobs_active = cron_data.get("jobs_active", 0)
+    job_names = cron_data.get("job_names", {})
+    runs_by_job = cron_data.get("runs_by_job", {})
+
+    if cron_runs > 0 or jobs_active > 0:
+        print(f"\n  Automated Work")
+        print("  " + "-" * 25)
+        print(f"    {'Active cron jobs':<22} {jobs_active}")
+        print(f"    {'Total runs':<22} {cron_runs}")
+        if cron_ok > 0:
+            success_pct = int(cron_ok / max(cron_runs, 1) * 100)
+            print(f"    {'Successful':<22} {cron_ok} ({success_pct}%)")
+        if cron_fail > 0:
+            print(f"    {'Failed':<22} {cron_fail}")
+
+        cron_saved = leverage.get("cron_manual_mins", 0)
+        cron_actual = leverage.get("cron_duration_mins", 0)
+        if cron_saved > 0:
+            print(f"    {'Time if manual':<22} {cron_saved:.0f} min")
+            print(f"    {'Actual run time':<22} {cron_actual:.1f} min")
+
+        # Show top automated jobs
+        if runs_by_job:
+            top_jobs = sorted(
+                runs_by_job.items(), key=lambda x: x[1], reverse=True
+            )[:5]
+            if top_jobs:
+                job_labels = [
+                    job_names.get(jid, jid)[:20] for jid, _ in top_jobs
+                ]
+                job_vals = [float(c) for _, c in top_jobs]
+                print(f"\n    By job:")
+                print(bar_chart(job_labels, job_vals))
+
+    # Agent Leverage section
+    agent_mins = leverage.get("agent_minutes", 0)
+    manual_mins = leverage.get("estimated_manual_minutes", 0)
+    time_saved = leverage.get("time_saved_minutes", 0)
+    lev_ratio = leverage.get("leverage_ratio", 0)
+    autonomy = leverage.get("avg_autonomy_ratio", 0)
+
+    if agent_mins > 0 or manual_mins > 0:
+        print(f"\n  Agent Leverage")
+        print("  " + "-" * 25)
+        if agent_mins > 0:
+            if agent_mins >= 60:
+                print(f"    {'Agent time':<22} {agent_mins / 60:.1f} hrs")
+            else:
+                print(f"    {'Agent time':<22} {agent_mins:.0f} min")
+        if manual_mins > 0:
+            if manual_mins >= 60:
+                print(f"    {'Est. manual time':<22} {manual_mins / 60:.1f} hrs")
+            else:
+                print(f"    {'Est. manual time':<22} {manual_mins:.0f} min")
+        if time_saved > 0:
+            if time_saved >= 60:
+                print(f"    {'Time saved':<22} {time_saved / 60:.1f} hrs")
+            else:
+                print(f"    {'Time saved':<22} {time_saved:.0f} min")
+        if lev_ratio > 0:
+            print(f"    {'Leverage ratio':<22} {lev_ratio:.1f}x")
+        if autonomy > 0:
+            print(f"    {'Autonomy':<22} {autonomy:.1f} tool calls/request")
+
     # Efficiency section
     if total_cost > 0 and total_outcomes > 0:
         print(f"\n  Efficiency")
@@ -805,10 +1114,12 @@ def report_summary(
     sessions: List[Dict[str, Any]],
     index: Dict[str, Any],
     memory_outcomes: Dict[str, Any],
+    cron_data: Dict[str, Any],
+    leverage: Dict[str, Any],
     period_days: int,
     fmt: str,
 ) -> None:
-    """Generate a quick summary report including outcomes."""
+    """Generate a quick summary report including outcomes, automation, and leverage."""
     total_cost = sum(s["cost"] for s in sessions)
     total_messages = sum(s["messages"] for s in sessions)
     total_tools = sum(s["total_tool_calls"] for s in sessions)
@@ -866,6 +1177,15 @@ def report_summary(
                 "decisions": memory_outcomes.get("decisions", 0),
                 "goals_completed": memory_outcomes.get("goals_completed", 0),
             },
+            "automation": {
+                "cron_runs": cron_data.get("successful_runs", 0),
+                "jobs_active": cron_data.get("jobs_active", 0),
+            },
+            "leverage": {
+                "ratio": leverage.get("leverage_ratio", 0),
+                "time_saved_mins": leverage.get("time_saved_minutes", 0),
+                "autonomy": leverage.get("avg_autonomy_ratio", 0),
+            },
         }
         print(json.dumps(out, indent=2))
         return
@@ -921,6 +1241,30 @@ def report_summary(
     )
     if total_cost > 0 and total_outcomes > 0:
         print(f"  Efficiency: {total_outcomes / total_cost:.1f} outcomes/$1")
+
+    # Automation line
+    cron_ok = cron_data.get("successful_runs", 0)
+    cron_jobs = cron_data.get("jobs_active", 0)
+    if cron_ok > 0:
+        print(f"\n  Automated: {cron_ok} cron runs across {cron_jobs} jobs")
+
+    # Leverage line
+    lev_ratio = leverage.get("leverage_ratio", 0)
+    time_saved = leverage.get("time_saved_minutes", 0)
+    autonomy = leverage.get("avg_autonomy_ratio", 0)
+    lev_parts: List[str] = []
+    if lev_ratio > 1.0:
+        lev_parts.append(f"{lev_ratio:.1f}x leverage")
+    if time_saved > 0:
+        if time_saved >= 60:
+            lev_parts.append(f"~{time_saved / 60:.1f} hrs saved")
+        else:
+            lev_parts.append(f"~{time_saved:.0f} min saved")
+    if autonomy > 0:
+        lev_parts.append(f"{autonomy:.1f} actions/request")
+    if lev_parts:
+        print(f"  Agent: {', '.join(lev_parts)}")
+
     print()
     print(f"  Top tools: {top_tools_str}")
 
@@ -1014,9 +1358,11 @@ def main() -> int:
             eprint("Sessions are expected in ~/.openclaw/agents/<agentId>/sessions/")
         return 1
 
-    # Load memory outcomes for reports that need them
+    # Load supplementary data for outcome-aware reports
     memory_dir = Path(args.memory_dir)
     memory_outcomes = count_memory_outcomes(memory_dir, since=since_dt)
+    cron_data = load_cron_runs(since=since_dt, until=until_dt)
+    leverage = compute_leverage(sessions, cron_data)
 
     # Dispatch report
     if args.report == "cost":
@@ -1028,9 +1374,15 @@ def main() -> int:
     elif args.report == "productivity":
         report_productivity(sessions, period_days, args.format)
     elif args.report == "outcomes":
-        report_outcomes(sessions, memory_outcomes, period_days, args.format)
+        report_outcomes(
+            sessions, memory_outcomes, cron_data, leverage,
+            period_days, args.format,
+        )
     elif args.report == "summary":
-        report_summary(sessions, index, memory_outcomes, period_days, args.format)
+        report_summary(
+            sessions, index, memory_outcomes, cron_data, leverage,
+            period_days, args.format,
+        )
 
     return 0
 

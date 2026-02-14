@@ -125,6 +125,93 @@ outcomes_per_dollar = outcomes / total_cost
 
 Track weekly. Spikes correlate with productive coding sessions. Dips correlate with research/exploration sessions (which are still valuable but don't produce countable outcomes).
 
+## Automation Metrics
+
+### Cron job success rate
+Reliability of automated tasks.
+
+**Source**: `~/.openclaw/cron/runs/*.jsonl` — each entry has `status` ("ok", "error", "skipped") and `durationMs`.
+
+**Formula**:
+```
+cron_success_rate = successful_runs / total_runs * 100
+```
+
+Track this weekly. A declining success rate indicates stale playbooks or broken dependencies.
+
+### Cron time saved
+How much human time do automated jobs replace?
+
+**Source**: Cron run logs for execution count, matched against manual time estimates per task type.
+
+**Formula**:
+```
+Manual time estimates (minutes):
+  daily-briefing:  5
+  weekly-insights: 15
+  backup:          3
+  analytics:       10
+  default:         5
+
+cron_time_saved = SUM(run_count * manual_estimate) - SUM(actual_duration_ms / 60000)
+```
+
+## Agent Leverage Metrics
+
+### Leverage ratio
+How much more work does the agent produce compared to doing it manually?
+
+**Source**: Session timestamps (first_ts to last_ts for agent wall-clock time) and outcome counts matched against conservative manual time estimates.
+
+**Formula**:
+```
+Manual time estimates (minutes per outcome):
+  files_touched:  8   (reading, editing, testing a file change)
+  git_commits:    3   (staging, writing message, committing)
+  prs_created:   20   (description, reviewers, linking issues)
+  tests_run:      4   (running tests, reviewing output)
+  issues_closed: 15   (investigating, fixing, verifying)
+
+estimated_manual_minutes = SUM(outcome_count * manual_estimate)
+leverage_ratio = estimated_manual_minutes / agent_minutes
+```
+
+A leverage ratio of 3.0x means the agent produces in 1 minute what would take 3 minutes manually. Track this to validate that agent assistance is genuinely saving time.
+
+**Interpretation**:
+- < 1.0x: Agent is slower than manual (unusual — may indicate stuck/looping sessions)
+- 1.0-2.0x: Modest leverage, typical for research-heavy sessions
+- 2.0-5.0x: Strong leverage, typical for code generation and editing
+- > 5.0x: High leverage, typical for batch operations and repetitive tasks
+
+### Autonomy ratio
+How much independent work does the agent do per user request?
+
+**Source**: Total tool calls / total user messages across sessions.
+
+**Formula**:
+```
+autonomy_ratio = total_tool_calls / total_user_messages
+```
+
+Higher values indicate the agent is doing more autonomous work per human prompt. A ratio of 8.0 means the agent takes 8 tool-call steps for every message the user sends.
+
+**Interpretation**:
+- 1-3: Highly interactive — user directing each step
+- 3-8: Balanced — user provides direction, agent executes multi-step plans
+- 8-15: Highly autonomous — agent handling complex tasks end-to-end
+- > 15: Batch processing or long automated workflows
+
+### Time saved
+Net time savings from using the agent vs doing work manually.
+
+**Formula**:
+```
+time_saved = (estimated_manual_minutes - agent_minutes) + (cron_manual_minutes - cron_duration_minutes)
+```
+
+Includes both interactive session savings and automated cron savings. A positive value means the agent is saving time. Track weekly to demonstrate ROI.
+
 ## Response Quality Metrics
 
 ### Follow-up question rate
@@ -368,3 +455,9 @@ jq -r 'select(.model) | .model' sessions/*.jsonl \
 | Cost per outcome | -- | > $2.00 | Long sessions without deliverables |
 | Outcomes per dollar | > 3.0 | 1.0-3.0 | Normal range for mixed work |
 | Outcomes per dollar | -- | < 1.0 | Mostly exploration/research sessions |
+| Cron success rate | > 95% | 80-95% | Check failing job logs |
+| Cron success rate | -- | < 80% | Playbooks need maintenance |
+| Leverage ratio | > 3.0x | 1.5-3.0x | Normal for mixed work |
+| Leverage ratio | -- | < 1.5x | Agent may be stuck on complex tasks |
+| Autonomy ratio | 3-15 | 1-3 or 15-25 | Very interactive or very autonomous |
+| Autonomy ratio | -- | > 25 | May indicate looping or runaway sessions |

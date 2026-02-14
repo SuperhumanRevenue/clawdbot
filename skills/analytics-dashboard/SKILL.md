@@ -25,7 +25,8 @@ Generate quantitative reports about your OpenClaw usage — costs, channel distr
 | Memory files | Decision count, knowledge entries, people tracked | `find memory/ -name "*.md" \| wc -l` |
 | Goals file | Goal progress metrics | Parse `memory/goals.md` |
 | Tool call inputs | Files modified, git commits, PRs, tests run | Parsed from `tool_use` blocks in session JSONL |
-| Cron run logs | Automation execution history | `openclaw cron runs` |
+| Cron run logs | Automation execution history, duration, status | `~/.openclaw/cron/runs/*.jsonl` |
+| Cron job defs | Active jobs, names, schedules | `~/.openclaw/cron/jobs.json` |
 
 ## Reports
 
@@ -44,6 +45,9 @@ When the user asks for analytics without specifics, generate this:
 
 🔨 Work done: {files_touched} files touched, {commits} commits, {prs} PRs, {test_runs} test runs
    Efficiency: {outcomes_per_dollar} outcomes/$1
+
+🤖 Automated: {cron_runs} cron runs across {jobs_active} jobs
+   Agent: {leverage_ratio}x leverage, ~{time_saved} saved, {autonomy} actions/request
 
 🧠 Memory: {decision_count} decisions, {knowledge_count} knowledge files, {people_count} people tracked
 
@@ -115,6 +119,17 @@ Measures actual work accomplished by analyzing tool call inputs and memory files
 - Goals active/completed (from goals.md)
 - Key results progress (checked/total from goals.md)
 - Follow-up completion rate (from people/*.md)
+
+**Automated Work** (from cron run logs at `~/.openclaw/cron/runs/`):
+- Active cron jobs and total runs (success/fail/skip)
+- Execution time vs estimated manual time
+- Breakdown by job (daily-briefing, weekly-insights, backup, etc.)
+
+**Agent Leverage** (computed from session timing and outcome counts):
+- Agent wall-clock time vs estimated manual time for equivalent work
+- Time saved (estimated manual - actual agent time)
+- Leverage ratio (manual estimate / agent time — higher = more multiplier)
+- Autonomy ratio (tool calls per user message — higher = more autonomous)
 
 **Efficiency**:
 - Total outcomes (composite count of all measurable deliverables)
