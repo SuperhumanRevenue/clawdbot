@@ -170,7 +170,7 @@ Claude Code will read MEMORY.md and recent daily logs at session start, and can 
 
 ## Heartbeat System
 
-A pluggable, periodic data gathering engine that monitors your tools and surfaces what needs attention.
+A pluggable, periodic data gathering engine that monitors your tools and surfaces what needs attention. See the full [Heartbeat Getting Started guide](heartbeat/GETTING-STARTED.md) for setup instructions.
 
 ```bash
 cd agent-memory/heartbeat
