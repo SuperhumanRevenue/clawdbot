@@ -71,6 +71,60 @@ jq -r 'select(.model) | .model' sessions/*.jsonl | sort | uniq -c | sort -rn
 
 Then multiply by per-model token pricing from the `models.providers` config or CodexBar data.
 
+## Outcome Metrics
+
+### Files touched
+Count of unique files modified or created during a session.
+
+**Source**: Tool call inputs in session JSONL — `Edit` and `Write` tool calls with `file_path` in the input object.
+
+**Formula**:
+```
+files_touched = COUNT(DISTINCT file_path FROM tool_calls WHERE tool_name IN ('Edit', 'Write'))
+```
+
+### Git commits
+Number of commits made during sessions.
+
+**Source**: Bash tool calls matching `git commit` in the command string.
+
+**Formula**:
+```
+git_commits = COUNT(tool_calls WHERE tool_name == 'Bash' AND command MATCHES /\bgit\s+commit\b/)
+```
+
+### PRs created
+Pull requests opened during sessions.
+
+**Source**: Bash tool calls matching `gh pr create`.
+
+### Test runs
+Test suite executions during sessions.
+
+**Source**: Bash tool calls matching common test runners: pytest, npm test, jest, vitest, cargo test, go test, rspec, phpunit, dotnet test.
+
+### Cost per outcome
+How much does each measurable deliverable cost?
+
+**Formula**:
+```
+outcomes = files_touched + git_commits + prs_created + issues_closed
+           + decisions + goals_completed + krs_done
+cost_per_outcome = total_cost / outcomes
+```
+
+A falling cost per outcome means you're getting more done per dollar. Rising cost per outcome may indicate sessions that consume tokens without producing deliverables (long exploration, debugging loops).
+
+### Outcomes per dollar
+Inverse of cost per outcome — higher is better.
+
+**Formula**:
+```
+outcomes_per_dollar = outcomes / total_cost
+```
+
+Track weekly. Spikes correlate with productive coding sessions. Dips correlate with research/exploration sessions (which are still valuable but don't produce countable outcomes).
+
 ## Response Quality Metrics
 
 ### Follow-up question rate
@@ -310,3 +364,7 @@ jq -r 'select(.model) | .model' sessions/*.jsonl \
 | Goal completion | -- | < 50% | Goals may be too ambitious |
 | Skill diversity | > 30% | 15-30% | Surface underused skills |
 | Skill diversity | -- | < 15% | Run skills-manager discovery |
+| Cost per outcome | < $0.50 | $0.50-$2.00 | Review session efficiency |
+| Cost per outcome | -- | > $2.00 | Long sessions without deliverables |
+| Outcomes per dollar | > 3.0 | 1.0-3.0 | Normal range for mixed work |
+| Outcomes per dollar | -- | < 1.0 | Mostly exploration/research sessions |

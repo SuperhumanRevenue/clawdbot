@@ -1,6 +1,6 @@
 ---
 name: analytics-dashboard
-description: Generate usage analytics, cost breakdowns, and productivity insights across all OpenClaw channels and skills. Use when the user asks "show my analytics", "usage report", "how much am I spending?", "which channels do I use most?", "skill usage stats", "cost breakdown", "dashboard", "trends", "am I using this effectively?", or any request for quantitative data about their OpenClaw usage patterns.
+description: Generate usage analytics, cost breakdowns, productivity insights, and measurable outcomes across all OpenClaw channels and skills. Use when the user asks "show my analytics", "usage report", "how much am I spending?", "which channels do I use most?", "skill usage stats", "cost breakdown", "dashboard", "trends", "am I using this effectively?", "what work got done?", "show outcomes", "show work done", or any request for quantitative data about their OpenClaw usage patterns and work accomplished.
 metadata:
   {
     "openclaw":
@@ -19,11 +19,12 @@ Generate quantitative reports about your OpenClaw usage — costs, channel distr
 
 | Source | What it provides | How to access |
 |--------|-----------------|---------------|
-| Session JSONL files | Message counts, costs, timestamps, tool calls | `jq` on `~/.openclaw/agents/<agentId>/sessions/*.jsonl` |
+| Session JSONL files | Message counts, costs, timestamps, tool calls, outcomes | `jq` on `~/.openclaw/agents/<agentId>/sessions/*.jsonl` |
 | `sessions.json` | Channel-to-session mapping | Read directly |
 | CodexBar | Per-model cost breakdown | `codexbar cost --format json --provider codex\|claude` |
 | Memory files | Decision count, knowledge entries, people tracked | `find memory/ -name "*.md" \| wc -l` |
 | Goals file | Goal progress metrics | Parse `memory/goals.md` |
+| Tool call inputs | Files modified, git commits, PRs, tests run | Parsed from `tool_use` blocks in session JSONL |
 | Cron run logs | Automation execution history | `openclaw cron runs` |
 
 ## Reports
@@ -40,6 +41,9 @@ When the user asks for analytics without specifics, generate this:
 
 💬 Sessions: {count} across {channel_count} channels
    Most active: {channel} ({pct}%)
+
+🔨 Work done: {files_touched} files touched, {commits} commits, {prs} PRs, {test_runs} test runs
+   Efficiency: {outcomes_per_dollar} outcomes/$1
 
 🧠 Memory: {decision_count} decisions, {knowledge_count} knowledge files, {people_count} people tracked
 
@@ -86,6 +90,36 @@ Derives skill usage from tool calls in session logs:
 - Skill chains (which skills get used together)
 - Unused skills (installed but never triggered)
 - Skill response satisfaction (follow-up question rate)
+
+### Outcomes Report
+
+```bash
+python {baseDir}/scripts/analytics.py --report outcomes --period 7d
+python {baseDir}/scripts/analytics.py --report outcomes --period 30d --memory-dir ./memory
+```
+
+Measures actual work accomplished by analyzing tool call inputs and memory files:
+
+**Code & Delivery** (extracted from session tool calls):
+- Files modified (Edit tool calls with unique file paths)
+- Files created (Write tool calls)
+- Git commits (Bash calls matching `git commit`)
+- Git pushes (Bash calls matching `git push`)
+- PRs created (Bash calls matching `gh pr create`)
+- Issues closed (Bash calls matching `gh issue close`)
+- Test runs (Bash calls matching pytest, npm test, jest, etc.)
+
+**Knowledge & Decisions** (extracted from memory vault):
+- Decisions recorded (from dated daily log files)
+- Knowledge articles (total and recently updated)
+- Goals active/completed (from goals.md)
+- Key results progress (checked/total from goals.md)
+- Follow-up completion rate (from people/*.md)
+
+**Efficiency**:
+- Total outcomes (composite count of all measurable deliverables)
+- Cost per outcome (total cost / total outcomes)
+- Outcomes per dollar (inverse — higher is better)
 
 ### Productivity Report
 

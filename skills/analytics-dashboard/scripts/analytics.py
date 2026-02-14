@@ -3,7 +3,8 @@
 
 Reads session JSONL files, parses timestamps, costs, message counts, tool
 calls, and channels to produce text-based reports with spark charts and
-bar charts.
+bar charts. Also extracts measurable outcomes (files changed, commits,
+PRs, tests, decisions, goals) to quantify work accomplished.
 
 Usage:
     python analytics.py --report summary --period 7d
@@ -11,6 +12,8 @@ Usage:
     python analytics.py --report channels --since 2025-01-01
     python analytics.py --report skills --period 90d
     python analytics.py --report productivity --period 7d
+    python analytics.py --report outcomes --period 7d
+    python analytics.py --report outcomes --period 30d --memory-dir ./memory
 """
 
 from __future__ import annotations
@@ -161,6 +164,15 @@ def parse_session_file(
     total_tokens_in = 0
     total_tokens_out = 0
 
+    # Outcome tracking
+    files_modified: set = set()
+    files_created: set = set()
+    git_commits = 0
+    git_pushes = 0
+    prs_created = 0
+    issues_closed = 0
+    tests_run = 0
+
     try:
         with open(path, encoding="utf-8") as fh:
             for line in fh:
@@ -209,6 +221,36 @@ def parse_session_file(
                                 tool_name = content.get("name", "unknown")
                                 tool_calls[tool_name] += 1
 
+                                # Extract outcomes from tool inputs
+                                tool_input = content.get("input", {})
+                                if tool_name == "Edit":
+                                    fp = tool_input.get("file_path", "")
+                                    if fp:
+                                        files_modified.add(fp)
+                                elif tool_name == "Write":
+                                    fp = tool_input.get("file_path", "")
+                                    if fp:
+                                        files_created.add(fp)
+                                elif tool_name == "Bash":
+                                    cmd = tool_input.get("command", "")
+                                    if cmd:
+                                        if re.search(r"\bgit\s+commit\b", cmd):
+                                            git_commits += 1
+                                        if re.search(r"\bgit\s+push\b", cmd):
+                                            git_pushes += 1
+                                        if re.search(r"\bgh\s+pr\s+create\b", cmd):
+                                            prs_created += 1
+                                        if re.search(r"\bgh\s+issue\s+close\b", cmd):
+                                            issues_closed += 1
+                                        if re.search(
+                                            r"\b(pytest|npm\s+test|yarn\s+test|"
+                                            r"cargo\s+test|go\s+test|make\s+test|"
+                                            r"python\s+-m\s+pytest|jest|vitest|"
+                                            r"rspec|phpunit|dotnet\s+test)\b",
+                                            cmd,
+                                        ):
+                                            tests_run += 1
+
                 elif entry_type == "usage":
                     usage = entry.get("usage", {})
                     cost_val = entry.get("costUSD", 0)
@@ -253,6 +295,15 @@ def parse_session_file(
         "first_ts": first_ts.isoformat() if first_ts else None,
         "last_ts": last_ts.isoformat() if last_ts else None,
         "date": first_ts.strftime("%Y-%m-%d") if first_ts else None,
+        # Outcomes
+        "files_modified": len(files_modified),
+        "files_created": len(files_created),
+        "files_touched": len(files_modified | files_created),
+        "git_commits": git_commits,
+        "git_pushes": git_pushes,
+        "prs_created": prs_created,
+        "issues_closed": issues_closed,
+        "tests_run": tests_run,
     }
 
 
@@ -274,6 +325,112 @@ def load_all_sessions(
             sessions.append(parsed)
 
     return sessions, index
+
+
+# ---------------------------------------------------------------------------
+# Memory-based outcome counting
+# ---------------------------------------------------------------------------
+
+
+def count_memory_outcomes(
+    memory_dir: Path,
+    since: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Count work outcomes from structured memory files.
+
+    Scans the memory vault for decisions, goals, knowledge articles,
+    and people tracked to quantify non-code work.
+    """
+    results: Dict[str, Any] = {
+        "decisions": 0,
+        "knowledge_files": 0,
+        "knowledge_updated": 0,
+        "goals_active": 0,
+        "goals_completed": 0,
+        "krs_done": 0,
+        "krs_total": 0,
+        "people_tracked": 0,
+        "followups_pending": 0,
+        "followups_done": 0,
+    }
+
+    if not memory_dir.is_dir():
+        return results
+
+    # Count decisions from dated daily log files
+    for f in memory_dir.glob("*.md"):
+        match = re.match(r"(\d{4}-\d{2}-\d{2})", f.name)
+        if not match:
+            continue
+        try:
+            file_date = datetime.strptime(match.group(1), "%Y-%m-%d")
+            if since and file_date < since:
+                continue
+        except ValueError:
+            continue
+        try:
+            content = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        results["decisions"] += len(re.findall(r"## Decision:", content))
+
+    # Count knowledge files and recent updates
+    knowledge_dir = memory_dir / "knowledge"
+    if knowledge_dir.is_dir():
+        for f in knowledge_dir.glob("*.md"):
+            results["knowledge_files"] += 1
+            if since:
+                try:
+                    mtime = datetime.fromtimestamp(f.stat().st_mtime)
+                    if mtime >= since:
+                        results["knowledge_updated"] += 1
+                except OSError:
+                    pass
+
+    # Parse goals
+    goals_file = memory_dir / "goals.md"
+    if goals_file.is_file():
+        try:
+            content = goals_file.read_text(encoding="utf-8")
+        except OSError:
+            content = ""
+        current_section = None
+        for line in content.split("\n"):
+            stripped = line.strip()
+            if stripped == "## Active":
+                current_section = "active"
+            elif stripped == "## Completed":
+                current_section = "completed"
+            elif stripped == "## Paused":
+                current_section = "paused"
+            elif line.startswith("### ") and current_section:
+                if current_section == "active":
+                    results["goals_active"] += 1
+                elif current_section == "completed":
+                    results["goals_completed"] += 1
+            elif re.match(r"\s+- \[x\]", line):
+                results["krs_done"] += 1
+                results["krs_total"] += 1
+            elif re.match(r"\s+- \[ \]", line):
+                results["krs_total"] += 1
+
+    # Count people and follow-ups
+    people_dir = memory_dir / "people"
+    if people_dir.is_dir():
+        for f in people_dir.glob("*.md"):
+            results["people_tracked"] += 1
+            try:
+                content = f.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            results["followups_pending"] += len(
+                re.findall(r"- \[ \]", content)
+            )
+            results["followups_done"] += len(
+                re.findall(r"- \[x\]", content)
+            )
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -489,16 +646,178 @@ def report_productivity(
         print(f"  Messages/day:  {spark_line(msg_vals)}")
 
 
-def report_summary(
+def report_outcomes(
     sessions: List[Dict[str, Any]],
-    index: Dict[str, Any],
+    memory_outcomes: Dict[str, Any],
     period_days: int,
     fmt: str,
 ) -> None:
-    """Generate a quick summary report."""
+    """Generate an outcomes report showing measurable work accomplished."""
+    # Aggregate code/delivery outcomes from sessions
+    total_files_modified = sum(s.get("files_modified", 0) for s in sessions)
+    total_files_created = sum(s.get("files_created", 0) for s in sessions)
+    total_files_touched = sum(s.get("files_touched", 0) for s in sessions)
+    total_commits = sum(s.get("git_commits", 0) for s in sessions)
+    total_pushes = sum(s.get("git_pushes", 0) for s in sessions)
+    total_prs = sum(s.get("prs_created", 0) for s in sessions)
+    total_issues_closed = sum(s.get("issues_closed", 0) for s in sessions)
+    total_tests = sum(s.get("tests_run", 0) for s in sessions)
+    total_cost = sum(s["cost"] for s in sessions)
+
+    # Daily outcome trends
+    daily_files: Dict[str, int] = defaultdict(int)
+    daily_commits: Dict[str, int] = defaultdict(int)
+    for s in sessions:
+        date = s.get("date", "unknown")
+        daily_files[date] += s.get("files_touched", 0)
+        daily_commits[date] += s.get("git_commits", 0)
+
+    # Composite outcome count for efficiency calc
+    code_outcomes = (
+        total_files_modified + total_files_created + total_commits
+        + total_prs + total_issues_closed
+    )
+    knowledge_outcomes = (
+        memory_outcomes.get("decisions", 0)
+        + memory_outcomes.get("knowledge_updated", 0)
+        + memory_outcomes.get("krs_done", 0)
+        + memory_outcomes.get("goals_completed", 0)
+    )
+    total_outcomes = code_outcomes + knowledge_outcomes
+
+    decisions = memory_outcomes.get("decisions", 0)
+    knowledge_files = memory_outcomes.get("knowledge_files", 0)
+    knowledge_updated = memory_outcomes.get("knowledge_updated", 0)
+    goals_active = memory_outcomes.get("goals_active", 0)
+    goals_completed = memory_outcomes.get("goals_completed", 0)
+    krs_done = memory_outcomes.get("krs_done", 0)
+    krs_total = memory_outcomes.get("krs_total", 0)
+    followups_done = memory_outcomes.get("followups_done", 0)
+    followups_pending = memory_outcomes.get("followups_pending", 0)
+
+    if fmt == "json":
+        out: Dict[str, Any] = {
+            "report": "outcomes",
+            "period_days": period_days,
+            "code": {
+                "files_modified": total_files_modified,
+                "files_created": total_files_created,
+                "files_touched": total_files_touched,
+                "git_commits": total_commits,
+                "git_pushes": total_pushes,
+                "prs_created": total_prs,
+                "issues_closed": total_issues_closed,
+                "test_runs": total_tests,
+            },
+            "knowledge": {
+                "decisions_recorded": decisions,
+                "knowledge_files": knowledge_files,
+                "knowledge_updated": knowledge_updated,
+                "goals_active": goals_active,
+                "goals_completed": goals_completed,
+                "krs_done": krs_done,
+                "krs_total": krs_total,
+                "followups_done": followups_done,
+                "followups_pending": followups_pending,
+            },
+            "efficiency": {
+                "total_outcomes": total_outcomes,
+                "cost_usd": round(total_cost, 4),
+                "cost_per_outcome": (
+                    round(total_cost / total_outcomes, 4)
+                    if total_outcomes > 0
+                    else None
+                ),
+                "outcomes_per_dollar": (
+                    round(total_outcomes / total_cost, 2)
+                    if total_cost > 0
+                    else None
+                ),
+            },
+        }
+        print(json.dumps(out, indent=2))
+        return
+
+    print(f"Outcomes Report ({period_days}d)")
+    print("=" * 50)
+
+    # Code & Delivery section
+    print("\n  Code & Delivery")
+    print("  " + "-" * 25)
+    code_rows: List[Tuple[str, int]] = [
+        ("Files modified", total_files_modified),
+        ("Files created", total_files_created),
+        ("Git commits", total_commits),
+        ("Git pushes", total_pushes),
+        ("PRs created", total_prs),
+        ("Issues closed", total_issues_closed),
+        ("Test runs", total_tests),
+    ]
+    for label, value in code_rows:
+        if value > 0:
+            print(f"    {label:<18} {value}")
+    if all(v == 0 for _, v in code_rows):
+        print("    (no code activity detected)")
+
+    # Daily trends
+    if daily_files:
+        sorted_days = sorted(daily_files.keys())
+        file_vals = [float(daily_files[d]) for d in sorted_days]
+        commit_vals = [float(daily_commits[d]) for d in sorted_days]
+        if any(v > 0 for v in file_vals):
+            print(f"\n    Files/day:   {spark_line(file_vals)}")
+        if any(v > 0 for v in commit_vals):
+            print(f"    Commits/day: {spark_line(commit_vals)}")
+
+    # Knowledge & Decisions section
+    print(f"\n  Knowledge & Decisions")
+    print("  " + "-" * 25)
+    knowledge_rows: List[Tuple[str, str]] = [
+        ("Decisions recorded", str(decisions)),
+        ("Knowledge articles", str(knowledge_files)),
+    ]
+    if knowledge_updated > 0:
+        knowledge_rows.append(("  Updated recently", str(knowledge_updated)))
+    if goals_active > 0 or goals_completed > 0:
+        knowledge_rows.append(("Goals active", str(goals_active)))
+        knowledge_rows.append(("Goals completed", str(goals_completed)))
+    if krs_total > 0:
+        knowledge_rows.append(("Key results", f"{krs_done}/{krs_total}"))
+    if followups_done > 0 or followups_pending > 0:
+        total_fu = followups_done + followups_pending
+        pct = int(followups_done / max(total_fu, 1) * 100)
+        knowledge_rows.append(("Follow-ups", f"{followups_done}/{total_fu} ({pct}%)"))
+
+    for label, value in knowledge_rows:
+        print(f"    {label:<22} {value}")
+
+    # Efficiency section
+    if total_cost > 0 and total_outcomes > 0:
+        print(f"\n  Efficiency")
+        print("  " + "-" * 25)
+        print(f"    {'Total outcomes':<18} {total_outcomes}")
+        print(f"    {'Total cost':<18} {format_cost(total_cost)}")
+        print(f"    {'Cost per outcome':<18} {format_cost(total_cost / total_outcomes)}")
+        print(f"    {'Outcomes per $1':<18} {total_outcomes / total_cost:.1f}")
+
+
+def report_summary(
+    sessions: List[Dict[str, Any]],
+    index: Dict[str, Any],
+    memory_outcomes: Dict[str, Any],
+    period_days: int,
+    fmt: str,
+) -> None:
+    """Generate a quick summary report including outcomes."""
     total_cost = sum(s["cost"] for s in sessions)
     total_messages = sum(s["messages"] for s in sessions)
     total_tools = sum(s["total_tool_calls"] for s in sessions)
+
+    # Outcome aggregates
+    total_files_touched = sum(s.get("files_touched", 0) for s in sessions)
+    total_commits = sum(s.get("git_commits", 0) for s in sessions)
+    total_prs = sum(s.get("prs_created", 0) for s in sessions)
+    total_tests = sum(s.get("tests_run", 0) for s in sessions)
 
     # Channels
     session_channels: Dict[str, str] = {}
@@ -539,6 +858,14 @@ def report_summary(
             "channel_count": len(channel_counts),
             "most_active_channel": channel_counts.most_common(1)[0][0] if channel_counts else "none",
             "top_tools": [t for t, _ in tool_counts.most_common(5)],
+            "outcomes": {
+                "files_touched": total_files_touched,
+                "git_commits": total_commits,
+                "prs_created": total_prs,
+                "test_runs": total_tests,
+                "decisions": memory_outcomes.get("decisions", 0),
+                "goals_completed": memory_outcomes.get("goals_completed", 0),
+            },
         }
         print(json.dumps(out, indent=2))
         return
@@ -565,6 +892,35 @@ def report_summary(
     print()
     print(f"  Messages: {total_messages} total, {total_messages / max(len(sessions), 1):.1f} avg/session")
     print(f"  Tool calls: {total_tools}")
+
+    # Work Done section
+    work_parts: List[str] = []
+    if total_files_touched > 0:
+        work_parts.append(f"{total_files_touched} files touched")
+    if total_commits > 0:
+        work_parts.append(f"{total_commits} commits")
+    if total_prs > 0:
+        work_parts.append(f"{total_prs} PRs")
+    if total_tests > 0:
+        work_parts.append(f"{total_tests} test runs")
+    decisions = memory_outcomes.get("decisions", 0)
+    if decisions > 0:
+        work_parts.append(f"{decisions} decisions")
+    goals_completed = memory_outcomes.get("goals_completed", 0)
+    if goals_completed > 0:
+        work_parts.append(f"{goals_completed} goals completed")
+
+    if work_parts:
+        print()
+        print(f"  Work done: {', '.join(work_parts)}")
+
+    # Efficiency
+    total_outcomes = (
+        total_files_touched + total_commits + total_prs + total_tests
+        + decisions + goals_completed
+    )
+    if total_cost > 0 and total_outcomes > 0:
+        print(f"  Efficiency: {total_outcomes / total_cost:.1f} outcomes/$1")
     print()
     print(f"  Top tools: {top_tools_str}")
 
@@ -588,7 +944,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--report",
-        choices=["cost", "channels", "skills", "productivity", "summary"],
+        choices=["cost", "channels", "skills", "productivity", "outcomes", "summary"],
         default="summary",
         help="Report type (default: summary)",
     )
@@ -610,6 +966,11 @@ def main() -> int:
         choices=["text", "json"],
         default="text",
         help="Output format (default: text)",
+    )
+    parser.add_argument(
+        "--memory-dir",
+        default="./memory",
+        help="Path to memory vault directory (default: ./memory)",
     )
 
     args = parser.parse_args()
@@ -653,6 +1014,10 @@ def main() -> int:
             eprint("Sessions are expected in ~/.openclaw/agents/<agentId>/sessions/")
         return 1
 
+    # Load memory outcomes for reports that need them
+    memory_dir = Path(args.memory_dir)
+    memory_outcomes = count_memory_outcomes(memory_dir, since=since_dt)
+
     # Dispatch report
     if args.report == "cost":
         report_cost(sessions, period_days, args.format)
@@ -662,8 +1027,10 @@ def main() -> int:
         report_skills(sessions, period_days, args.format)
     elif args.report == "productivity":
         report_productivity(sessions, period_days, args.format)
+    elif args.report == "outcomes":
+        report_outcomes(sessions, memory_outcomes, period_days, args.format)
     elif args.report == "summary":
-        report_summary(sessions, index, period_days, args.format)
+        report_summary(sessions, index, memory_outcomes, period_days, args.format)
 
     return 0
 
