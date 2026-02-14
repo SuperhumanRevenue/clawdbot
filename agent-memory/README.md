@@ -2,6 +2,15 @@
 
 A file-backed, Obsidian-native memory system for AI agents — adapted from OpenClaw's production memory architecture for the **Obsidian + Claude Code + Claude Agent SDK + Markdown** stack.
 
+## Quick Start (New Users)
+
+```bash
+# Run the interactive setup wizard — takes ~3 minutes
+./scripts/onboard.sh
+```
+
+Or see [GETTING-STARTED.md](GETTING-STARTED.md) for a full step-by-step guide.
+
 ## Architecture
 
 ```
